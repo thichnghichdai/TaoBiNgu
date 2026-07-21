@@ -6,7 +6,7 @@ on:
       timeout:
         description: 'Build timeout (minutes)'
         required: true
-        default: '120'
+        default: 120
         type: number
       target_platform:
         description: 'Target platform'
@@ -33,7 +33,7 @@ on:
       keepalive:
         description: 'Keep runner alive for manual debug'
         required: true
-        default: 'true'
+        default: true
         type: boolean
       deploy_hook:
         description: 'Deploy webhook URL (optional)'
@@ -252,7 +252,7 @@ jobs:
           Write-Host "::endgroup::"
 
       - name: "⏱️ Monitor Build Status"
-        if: ${{ inputs.keepalive == 'true' }}
+        if: ${{ inputs.keepalive }}
         shell: pwsh
         run: |
           Write-Host ""
