@@ -66,43 +66,54 @@ jobs:
 
       - name: CLOUDFLARED TUNNEL TCP 3389
         run: |
-          Write-Host "🌐 Cai dat Cloudflare Tunnel (ko can auth key)..." -ForegroundColor Yellow
+          Write-Host "🌐 Cai dat Cloudflare Tunnel..." -ForegroundColor Yellow
           $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
           $cfExe = "$env:TEMP\cloudflared.exe"
           Invoke-WebRequest -Uri $cfUrl -OutFile $cfExe -UseBasicParsing
-          Write-Host "✅ Cloudflared da tai xong!" -ForegroundColor Green
+          Write-Host "✅ Da tai cloudflared!" -ForegroundColor Green
 
-          Write-Host "🚀 Khoi tao tunnel..." -ForegroundColor Yellow
-          $logFile = "$env:TEMP\cf.log"
-          $proc = Start-Process -FilePath $cfExe -ArgumentList "tunnel --url tcp://localhost:3389" -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError $logFile
+          # Start cloudflared background job - KO redirect file
+          $global:tunnelJob = Start-Job -ScriptBlock {
+              param($exe)
+              & $exe tunnel --url tcp://localhost:3389 2>&1
+          } -ArgumentList $cfExe
 
-          # Doi tunnel URL
+          Write-Host "⏳ Đợi tunnel khởi tạo 15s..." -ForegroundColor Yellow
+          Start-Sleep -Seconds 15
+
+          # Doc output, dung -Keep de job van song
+          $output = Receive-Job -Job $global:tunnelJob -Keep -ErrorAction SilentlyContinue
+          Write-Host "Raw output: $output"
+
           $tunnelUrl = $null
-          for ($i = 0; $i -lt 15; $i++) {
-              Start-Sleep -Seconds 3
-              if (Test-Path $logFile) {
-                  $log = Get-Content $logFile -Raw
-                  $match = [regex]::Match($log, 'https://([a-z0-9-]+\.trycloudflare\.com)')
-                  if ($match.Success) {
-                      $tunnelUrl = $match.Groups[1].Value
-                      "TUNNEL_URL=$tunnelUrl`:443" | Out-File -FilePath $env:GITHUB_ENV -Append
-                      break
-                  }
-              }
+          $match = [regex]::Match($output, 'https://([a-z0-9-]+\.trycloudflare\.com)')
+          if ($match.Success) {
+              $tunnelUrl = $match.Groups[1].Value
+              "TUNNEL_URL=$tunnelUrl`:443" | Out-File -FilePath $env:GITHUB_ENV -Append
           }
 
           if ($tunnelUrl) {
-              Write-Host "✅ Cloudflare Tunnel da san sang!" -ForegroundColor Green
-              Write-Host "🔗 Tunnel: $tunnelUrl:443" -ForegroundColor Cyan
+              Write-Host "✅ Cloudflare Tunnel: $tunnelUrl:443" -ForegroundColor Green
           } else {
-              Write-Host "⚠️ Khong lay duoc URL, kiem tra log:" -ForegroundColor Red
-              Get-Content $logFile -Tail 5
-              Write-Host "Dung thu tunnel voi bore..." -ForegroundColor Yellow
-              $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
-              $zip = "$env:TEMP\bore.zip"
-              Invoke-WebRequest -Uri $url -OutFile $zip
-              Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
-              Start-Process -NoNewWindow -FilePath "$env:TEMP\bore\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub"
+              Write-Host "⏳ Chua co URL, cho them 10s..." -ForegroundColor Yellow
+              Start-Sleep -Seconds 10
+              $output = Receive-Job -Job $global:tunnelJob -Keep -ErrorAction SilentlyContinue
+              $match = [regex]::Match($output, 'https://([a-z0-9-]+\.trycloudflare\.com)')
+              if ($match.Success) {
+                  $tunnelUrl = $match.Groups[1].Value
+                  "TUNNEL_URL=$tunnelUrl`:443" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  Write-Host "✅ Cloudflare Tunnel: $tunnelUrl:443" -ForegroundColor Green
+              } else {
+                  Write-Host "⚠️ Fallback sang bore..." -ForegroundColor Yellow
+                  $global:tunnelJob | Stop-Job 2>$null
+                  Remove-Job $global:tunnelJob -Force 2>$null
+                  $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
+                  $zip = "$env:TEMP\bore.zip"
+                  Invoke-WebRequest -Uri $url -OutFile $zip
+                  Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
+                  Start-Process -NoNewWindow -FilePath "$env:TEMP\bore\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub"
+                  Write-Host "✅ Bore da chay!" -ForegroundColor Green
+              }
           }
 
       - name: THONG TIN KET NOI
