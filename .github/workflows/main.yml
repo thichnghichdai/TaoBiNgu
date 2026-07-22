@@ -53,80 +53,103 @@ jobs:
           Write-Host "=== Trying Cloudflare Tunnel (cloudflared) ==="
           $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
           $cfExe = "$env:TEMP\cloudflared.exe"
+          $logFile = "$env:TEMP\cf.log"
           
           try {
               Invoke-WebRequest -Uri $cfUrl -OutFile $cfExe -UseBasicParsing
               
-              $job = Start-Job -ScriptBlock {
-                  param($exe)
-                  & $exe tunnel --url tcp://localhost:3389 2>&1
-              } -ArgumentList $cfExe
+              # Run cloudflared directly, tee output to log file
+              # Use Start-Process with -NoNewWindow to keep it running
+              $proc = Start-Process -FilePath $cfExe -ArgumentList "tunnel --url tcp://localhost:3389" -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError $logFile
               
-              Start-Sleep -Seconds 10
-              $output = Receive-Job -Job $job -ErrorAction SilentlyContinue
-              Write-Host "cloudflared output: $output"
+              Write-Host "cloudflared started with PID: $($proc.Id)"
+              "CF_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
               
-              if ($output -match 'https://[a-z0-9-]+\.trycloudflare\.com') {
-                  $tunnelUrl = $Matches[0]
-                  $tunnelHost = $tunnelUrl -replace 'https://', ''
+              # Wait for tunnel URL to appear in log
+              $tunnelHost = $null
+              for ($i = 0; $i -lt 20; $i++) {
+                  Start-Sleep -Seconds 3
+                  if (Test-Path $logFile) {
+                      $log = Get-Content $logFile -Raw
+                      Write-Host "Log: $log"
+                      # Match URL in various formats
+                      if ($log -match 'https://([a-z0-9-]+\.trycloudflare\.com)') {
+                          $tunnelHost = $Matches[1]
+                          break
+                      }
+                  }
+              }
+              
+              if ($tunnelHost) {
                   Write-Host "::notice title=Tunnel URL::$tunnelHost:443 (cloudflared)"
                   "TUNNEL_URL=$tunnelHost:443" | Out-File -FilePath $env:GITHUB_ENV -Append
                   "TUNNEL_TYPE=cloudflared" | Out-File -FilePath $env:GITHUB_ENV -Append
-                  $job | Stop-Job
                   return
               }
-              $job | Stop-Job
+              
+              Write-Warning "cloudflared URL not found in log"
           } catch {
               Write-Warning "cloudflared failed: $_"
           }
 
           Write-Host "=== Fallback: Trying bore.pub ==="
-          $boreUrls = @(
-              "https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-pc-windows-msvc.zip",
-              "https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-windows.zip",
-              "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-x86_64-pc-windows-msvc.zip"
-          )
-          
-          $boreExe = $null
-          foreach ($url in $boreUrls) {
-              try {
-                  $zipPath = "$env:TEMP\bore.zip"
-                  Write-Host "Trying: $url"
-                  Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
-                  Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\bore" -Force
-                  $boreExe = "$env:TEMP\bore\bore.exe"
-                  if (Test-Path $boreExe) { break }
-              } catch {
-                  Write-Warning "Failed: $url - $_"
+          # Get latest bore release assets dynamically
+          try {
+              $apiUrl = "https://api.github.com/repos/ekzhang/bore/releases/latest"
+              $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
+              $assetUrl = $release.assets | Where-Object { $_.name -like '*windows*amd64*' -or $_.name -like '*x86_64*windows*' } | Select-Object -First 1 -ExpandProperty browser_download_url
+              
+              if (-not $assetUrl) {
+                  throw "No matching bore asset found"
               }
+              
+              Write-Host "Found bore asset: $assetUrl"
+              $zipPath = "$env:TEMP\bore.zip"
+              Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
+              Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\bore" -Force
+              $boreExe = "$env:TEMP\bore\bore.exe"
+              
+              if (-not (Test-Path $boreExe)) {
+                  # Try find bore.exe in extracted folder
+                  $boreExe = Get-ChildItem -Path "$env:TEMP\bore" -Recurse -Filter "bore.exe" | Select-Object -First 1 -ExpandProperty FullName
+              }
+              
+              if (-not (Test-Path $boreExe)) {
+                  throw "bore.exe not found after extraction"
+              }
+              
+              Write-Host "Starting bore tunnel on port 3389..."
+              $proc = Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\bore.log" -RedirectStandardError "$env:TEMP\bore.log"
+              "BORE_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
+              
+              Start-Sleep -Seconds 8
+              
+              if (Test-Path "$env:TEMP\bore.log") {
+                  $log = Get-Content "$env:TEMP\bore.log" -Raw
+                  Write-Host "bore log: $log"
+                  
+                  if ($log -match 'accepted.*?:(\d+)') {
+                      $tunnelPort = $Matches[1]
+                  } elseif ($log -match 'listening on.*?:(\d+)') {
+                      $tunnelPort = $Matches[1]
+                  } elseif ($log -match 'port (\d+)') {
+                      $tunnelPort = $Matches[1]
+                  } else {
+                      $tunnelPort = 3389
+                  }
+                  
+                  $tunnelUrl = "bore.pub:$tunnelPort"
+                  Write-Host "::notice title=Tunnel URL::$tunnelUrl"
+                  "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  "TUNNEL_TYPE=bore" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  return
+              }
+          } catch {
+              Write-Error "Bore fallback failed: $_"
           }
           
-          if (-not $boreExe -or -not (Test-Path $boreExe)) {
-              Write-Error "All bore downloads failed"
-              exit 1
-          }
-
-          Write-Host "Starting bore tunnel on port 3389..."
-          $job = Start-Job -ScriptBlock {
-              param($exe)
-              & $exe local 3389 --to bore.pub 2>&1
-          } -ArgumentList $boreExe
-          
-          Start-Sleep -Seconds 10
-          $output = Receive-Job -Job $job -ErrorAction SilentlyContinue
-          Write-Host "bore output: $output"
-          
-          if ($output -match 'accepted.*?:(\d+)') {
-              $tunnelPort = $Matches[1]
-          } elseif ($output -match 'listening on.*?:(\d+)') {
-              $tunnelPort = $Matches[1]
-          } else {
-              $tunnelPort = 3389
-          }
-          $tunnelUrl = "bore.pub:$tunnelPort"
-          Write-Host "::notice title=Tunnel URL::$tunnelUrl"
-          "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "TUNNEL_TYPE=bore" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Error "All tunnel methods failed"
+          exit 1
 
       - name: Verify service connectivity
         run: |
