@@ -29,8 +29,21 @@ jobs:
               Remove-LocalUser -Name "svc_admin" -Force
           }
 
-          Add-Type -AssemblyName System.Web
-          $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+          # Generate secure password without System.Web
+          $chars = @(
+              [char[]](65..90)    # A-Z
+              [char[]](97..122)   # a-z
+              [char[]](48..57)    # 0-9
+              [char[]](33..47) +  # !"#$%&'()*+,-./
+              [char[]](58..64) +  # :;<=>?@
+              [char[]](91..96) +  # [\]^_`
+              [char[]](123..126)  # {|}~
+          )
+          $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
+          $bytes = [byte[]]::new(16)
+          $rng.GetBytes($bytes)
+          $password = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Count] })
+
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           New-LocalUser -Name "svc_admin" -Password $securePass -AccountNeverExpires
