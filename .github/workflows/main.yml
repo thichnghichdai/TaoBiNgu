@@ -6,10 +6,10 @@ on:
       password:
         description: 'Chon mat khau'
         required: true
-        default: 'AcherLab@2026!'
+        default: 'cocaicc1A@@'
         type: choice
         options:
-        - 'AcherLab@2026!'
+        - 'cocaicc1A@@'
         - 'P@ssw0rd!AcherLab2026'
 
 jobs:
