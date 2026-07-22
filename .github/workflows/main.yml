@@ -50,13 +50,13 @@ jobs:
           try {
             New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
           } catch {
-            Write-Host "⚠️ Password policy fail, thu password manual..."
+            Write-Host "Password policy fail, generate auto..."
             $special = [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
             $p = "AcherLab@" + (-join (1..4 | %{ -join ((48..57) | Get-Random -Count 3 | %{[char]$_}) })) + (-join ($special | Get-Random -Count 2 | %{[char]$_}))
             $newPass = ConvertTo-SecureString $p -AsPlainText -Force
             New-LocalUser -Name "AcherLab" -Password $newPass -AccountNeverExpires -PasswordNeverExpires
             echo "RDP_PASS=$p" >> $env:GITHUB_ENV
-            Write-Host "✅ Password auto-generated: $p"
+            Write-Host "Password auto-generated: $p"
           }
           Add-LocalGroupMember -Group "Administrators" -Member "AcherLab"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AcherLab"
@@ -65,90 +65,85 @@ jobs:
 
       - name: CAI DAT OPENSSH
         run: |
-          Write-Host "🔧 Cai OpenSSH cho Pinggy tunnel..." -ForegroundColor Yellow
+          Write-Host "Cai OpenSSH cho Pinggy tunnel..." -ForegroundColor Yellow
           Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
-          Write-Host "✅ OpenSSH da san sang!" -ForegroundColor Green
+          Write-Host "OpenSSH da san sang!" -ForegroundColor Green
 
       - name: PINGGY TUNNEL TCP 3389
         run: |
-          Write-Host "🌐 Cai dat Pinggy tunnel (raw TCP, ko can auth)..." -ForegroundColor Yellow
-          
-          # Pinggy dung SSH de tao raw TCP tunnel
-          # Output se co URL: tcp://xxx.pinggy.link:PORT hoac pinggy.link:PORT
+          Write-Host "Cai dat Pinggy tunnel (raw TCP)..." -ForegroundColor Yellow
           $pinggyJob = Start-Job -ScriptBlock {
-              $env:SSH_ASKPASS = ""  # Tranh prompt password
-              $result = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 443 -R0:localhost:3389 a.pinggy.io 2>&1
+              $result = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1
+              $result | Out-File "$env:TEMP\pinggy.log" -Force
               $result
           }
-
-          Write-Host "⏳ Đợi Pinggy tunnel 20s..." -ForegroundColor Yellow
-          Start-Sleep -Seconds 20
-
-          $output = Receive-Job -Job $pinggyJob -Keep -ErrorAction SilentlyContinue
+          Write-Host "Doi Pinggy tunnel 25s..." -ForegroundColor Yellow
+          Start-Sleep -Seconds 25
+          $output = Receive-Job -Job $pinggyJob -Keep -ErrorAction SilentlyContinue | Out-String
+          if (-not $output) {
+              if (Test-Path "$env:TEMP\pinggy.log") {
+                  $output = Get-Content "$env:TEMP\pinggy.log" -Raw
+              }
+          }
           Write-Host "Pinggy output: $output"
-
           $tunnelUrl = $null
-          # Match cac format: tcp://pinggy.link:PORT hoac pinggy.link:PORT hoac xxx.pinggy.link:PORT
-          $match = [regex]::Match($output, '(?:tcp://)?([a-zA-Z0-9-]+\.pinggy(?:\.[a-z]+)+|localhost):(\d+)')
-          if (-not $match.Success) {
-              $match = [regex]::Match($output, '(\d+\.\d+\.\d+\.\d+):(\d+)')
+          if ($output) {
+              $match = [regex]::Match($output, '([a-zA-Z0-9-]+\.pinggy(?:\.(?:io|link|net))+(?::\d+)?)')
+              if (-not $match.Success) {
+                  $match = [regex]::Match($output, '(?:tcp://)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+):(\d+)')
+              }
+              if (-not $match.Success) {
+                  $match = [regex]::Match($output, '(\d+\.\d+\.\d+\.\d+):(\d+)')
+              }
+              if ($match.Success) {
+                  $tunnelUrl = $match.Value
+                  if ($tunnelUrl -notmatch ':\d+$') {
+                      $tunnelUrl = "$tunnelUrl:443"
+                  }
+                  "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
+              }
           }
-          if (-not $match.Success) {
-              $match = [regex]::Match($output, '([a-zA-Z0-9-]+\.pinggy(?:\.[a-z]+)+)')
-          }
-          if ($match.Success) {
-              $hostPart = $match.Groups[1].Value
-              $portPart = if ($match.Groups.Count -gt 2 -and $match.Groups[2].Value) { $match.Groups[2].Value } else { "443" }
-              $tunnelUrl = "$hostPart`:$portPart"
-              "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
-
           if ($tunnelUrl) {
-              Write-Host "✅ Pinggy tunnel: $tunnelUrl" -ForegroundColor Green
+              Write-Host "Pinggy tunnel: $tunnelUrl" -ForegroundColor Green
           } else {
-              Write-Host "⚠️ Pinggy ko lay duoc URL, fallback sang bore..." -ForegroundColor Yellow
+              Write-Host "Pinggy fail, fallback sang bore..." -ForegroundColor Yellow
               $pinggyJob | Stop-Job 2>$null
               Remove-Job $pinggyJob -Force 2>$null
-              
-              Write-Host "📦 Tai bore tunnel..." -ForegroundColor Yellow
+              Write-Host "Tai bore tunnel..." -ForegroundColor Yellow
               $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
               $zip = "$env:TEMP\bore.zip"
               Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
               Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
               $boreJob = Start-Job -ScriptBlock {
                   param($borePath)
-                  & $borePath local 3389 --to bore.pub 2>&1
+                  & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
               } -ArgumentList "$env:TEMP\bore\bore.exe"
-              
-              Start-Sleep -Seconds 8
-              $boreOutput = Receive-Job -Job $boreJob -Keep -ErrorAction SilentlyContinue
+              Start-Sleep -Seconds 10
+              $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
               Write-Host "Bore output: $boreOutput"
-              
               $boreMatch = [regex]::Match($boreOutput, 'accepted.*?:(\d+)')
               if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'listening on.*?:(\d+)') }
               if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, '(\d{4,5})') }
-              
               $borePort = if ($boreMatch.Success) { $boreMatch.Groups[1].Value } else { "3389" }
               $tunnelUrl = "bore.pub:$borePort"
               "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
-              Write-Host "✅ Bore tunnel: $tunnelUrl" -ForegroundColor Green
+              Write-Host "Bore tunnel: $tunnelUrl" -ForegroundColor Green
           }
 
       - name: THONG TIN KET NOI
         run: |
           $urlToShow = if ($env:TUNNEL_URL) { $env:TUNNEL_URL } else { "bore.pub (xem log de lay port)" }
           Write-Host ""
-          Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-          Write-Host "║              ACHERLAB RDP READY                ║" -ForegroundColor Cyan
-          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
-          Write-Host "║  Runner: ${{ matrix.os }}" -ForegroundColor White
-          Write-Host "║  User:   AcherLab" -ForegroundColor White
-          Write-Host "║  Pass:   ${{ github.event.inputs.password }}" -ForegroundColor White
-          Write-Host "║  Tunnel: $urlToShow" -ForegroundColor Green
-          Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host "============================================" -ForegroundColor Cyan
+          Write-Host "  ACHERLAB RDP READY" -ForegroundColor Cyan
+          Write-Host "============================================" -ForegroundColor Cyan
+          Write-Host "  Runner: ${{ matrix.os }}" -ForegroundColor White
+          Write-Host "  User:   AcherLab" -ForegroundColor White
+          Write-Host "  Pass:   ${{ github.event.inputs.password }}" -ForegroundColor White
+          Write-Host "  Tunnel: $urlToShow" -ForegroundColor Green
+          Write-Host "============================================" -ForegroundColor Cyan
           Write-Host ""
-          Write-Host "📌 User: AcherLab | Pass: ${{ github.event.inputs.password }} | Tunnel: $urlToShow" -ForegroundColor Yellow
-          Write-Host "📌 Linux (xfreerdp): xfreerdp /v:$urlToShow /u:AcherLab /p:'${{ github.event.inputs.password }}' /cert-ignore /size:1920x1080 /dynamic-resolution +clipboard +fonts +aero /gdi:hw" -ForegroundColor Yellow
+          Write-Host "Linux (xfreerdp): xfreerdp /v:$urlToShow /u:AcherLab /p:'${{ github.event.inputs.password }}' /cert-ignore /size:1920x1080 /dynamic-resolution +clipboard +fonts +aero /gdi:hw" -ForegroundColor Yellow
 
       - name: DUY TRI PHIEN
         run: |
@@ -158,6 +153,6 @@ jobs:
             $h = [math]::Max(0, [math]::Floor($r.TotalHours))
             $m = [math]::Max(0, [math]::Floor($r.TotalMinutes % 60))
             $s = [math]::Max(0, [math]::Floor($r.TotalSeconds % 60))
-            Write-Host "`r⏳ Con lai: $h gio $m phut $s giay" -NoNewline -ForegroundColor Cyan
+            Write-Host "`rCon lai: $h gio $m phut $s giay" -NoNewline -ForegroundColor Cyan
             Start-Sleep -Seconds 5
           } while ($r.TotalSeconds -gt 0)
