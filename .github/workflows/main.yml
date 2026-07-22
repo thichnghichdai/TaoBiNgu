@@ -51,7 +51,6 @@ jobs:
             New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
           } catch {
             Write-Host "⚠️ Password policy fail, thu password manual..."
-            # Tu dong generate password dam bao complexity
             $special = [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
             $p = "AcherLab@" + (-join (1..4 | %{ -join ((48..57) | Get-Random -Count 3 | %{[char]$_}) })) + (-join ($special | Get-Random -Count 2 | %{[char]$_}))
             $newPass = ConvertTo-SecureString $p -AsPlainText -Force
@@ -64,56 +63,75 @@ jobs:
           Enable-LocalUser -Name "AcherLab"
           echo "RDP_USER=AcherLab" >> $env:GITHUB_ENV
 
-      - name: CLOUDFLARED TUNNEL TCP 3389
+      - name: CAI DAT OPENSSH
         run: |
-          Write-Host "🌐 Cai dat Cloudflare Tunnel..." -ForegroundColor Yellow
-          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          $cfExe = "$env:TEMP\cloudflared.exe"
-          Invoke-WebRequest -Uri $cfUrl -OutFile $cfExe -UseBasicParsing
-          Write-Host "✅ Da tai cloudflared!" -ForegroundColor Green
+          Write-Host "🔧 Cai OpenSSH cho Pinggy tunnel..." -ForegroundColor Yellow
+          Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
+          Write-Host "✅ OpenSSH da san sang!" -ForegroundColor Green
 
-          # Start cloudflared background job - KO redirect file
-          $global:tunnelJob = Start-Job -ScriptBlock {
-              param($exe)
-              & $exe tunnel --url tcp://localhost:3389 2>&1
-          } -ArgumentList $cfExe
+      - name: PINGGY TUNNEL TCP 3389
+        run: |
+          Write-Host "🌐 Cai dat Pinggy tunnel (raw TCP, ko can auth)..." -ForegroundColor Yellow
+          
+          # Pinggy dung SSH de tao raw TCP tunnel
+          # Output se co URL: tcp://xxx.pinggy.link:PORT hoac pinggy.link:PORT
+          $pinggyJob = Start-Job -ScriptBlock {
+              $env:SSH_ASKPASS = ""  # Tranh prompt password
+              $result = ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -p 443 -R0:localhost:3389 a.pinggy.io 2>&1
+              $result
+          }
 
-          Write-Host "⏳ Đợi tunnel khởi tạo 15s..." -ForegroundColor Yellow
-          Start-Sleep -Seconds 15
+          Write-Host "⏳ Đợi Pinggy tunnel 20s..." -ForegroundColor Yellow
+          Start-Sleep -Seconds 20
 
-          # Doc output, dung -Keep de job van song
-          $output = Receive-Job -Job $global:tunnelJob -Keep -ErrorAction SilentlyContinue
-          Write-Host "Raw output: $output"
+          $output = Receive-Job -Job $pinggyJob -Keep -ErrorAction SilentlyContinue
+          Write-Host "Pinggy output: $output"
 
           $tunnelUrl = $null
-          $match = [regex]::Match($output, 'https://([a-z0-9-]+\.trycloudflare\.com)')
+          # Match cac format: tcp://pinggy.link:PORT hoac pinggy.link:PORT hoac xxx.pinggy.link:PORT
+          $match = [regex]::Match($output, '(?:tcp://)?([a-zA-Z0-9-]+\.pinggy(?:\.[a-z]+)+|localhost):(\d+)')
+          if (-not $match.Success) {
+              $match = [regex]::Match($output, '(\d+\.\d+\.\d+\.\d+):(\d+)')
+          }
+          if (-not $match.Success) {
+              $match = [regex]::Match($output, '([a-zA-Z0-9-]+\.pinggy(?:\.[a-z]+)+)')
+          }
           if ($match.Success) {
-              $tunnelUrl = $match.Groups[1].Value
-              "TUNNEL_URL=$tunnelUrl`:443" | Out-File -FilePath $env:GITHUB_ENV -Append
+              $hostPart = $match.Groups[1].Value
+              $portPart = if ($match.Groups.Count -gt 2 -and $match.Groups[2].Value) { $match.Groups[2].Value } else { "443" }
+              $tunnelUrl = "$hostPart`:$portPart"
+              "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
           }
 
           if ($tunnelUrl) {
-              Write-Host "✅ Cloudflare Tunnel: $tunnelUrl:443" -ForegroundColor Green
+              Write-Host "✅ Pinggy tunnel: $tunnelUrl" -ForegroundColor Green
           } else {
-              Write-Host "⏳ Chua co URL, cho them 10s..." -ForegroundColor Yellow
-              Start-Sleep -Seconds 10
-              $output = Receive-Job -Job $global:tunnelJob -Keep -ErrorAction SilentlyContinue
-              $match = [regex]::Match($output, 'https://([a-z0-9-]+\.trycloudflare\.com)')
-              if ($match.Success) {
-                  $tunnelUrl = $match.Groups[1].Value
-                  "TUNNEL_URL=$tunnelUrl`:443" | Out-File -FilePath $env:GITHUB_ENV -Append
-                  Write-Host "✅ Cloudflare Tunnel: $tunnelUrl:443" -ForegroundColor Green
-              } else {
-                  Write-Host "⚠️ Fallback sang bore..." -ForegroundColor Yellow
-                  $global:tunnelJob | Stop-Job 2>$null
-                  Remove-Job $global:tunnelJob -Force 2>$null
-                  $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
-                  $zip = "$env:TEMP\bore.zip"
-                  Invoke-WebRequest -Uri $url -OutFile $zip
-                  Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
-                  Start-Process -NoNewWindow -FilePath "$env:TEMP\bore\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub"
-                  Write-Host "✅ Bore da chay!" -ForegroundColor Green
-              }
+              Write-Host "⚠️ Pinggy ko lay duoc URL, fallback sang bore..." -ForegroundColor Yellow
+              $pinggyJob | Stop-Job 2>$null
+              Remove-Job $pinggyJob -Force 2>$null
+              
+              Write-Host "📦 Tai bore tunnel..." -ForegroundColor Yellow
+              $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
+              $zip = "$env:TEMP\bore.zip"
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+              Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
+              $boreJob = Start-Job -ScriptBlock {
+                  param($borePath)
+                  & $borePath local 3389 --to bore.pub 2>&1
+              } -ArgumentList "$env:TEMP\bore\bore.exe"
+              
+              Start-Sleep -Seconds 8
+              $boreOutput = Receive-Job -Job $boreJob -Keep -ErrorAction SilentlyContinue
+              Write-Host "Bore output: $boreOutput"
+              
+              $boreMatch = [regex]::Match($boreOutput, 'accepted.*?:(\d+)')
+              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'listening on.*?:(\d+)') }
+              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, '(\d{4,5})') }
+              
+              $borePort = if ($boreMatch.Success) { $boreMatch.Groups[1].Value } else { "3389" }
+              $tunnelUrl = "bore.pub:$borePort"
+              "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
+              Write-Host "✅ Bore tunnel: $tunnelUrl" -ForegroundColor Green
           }
 
       - name: THONG TIN KET NOI
