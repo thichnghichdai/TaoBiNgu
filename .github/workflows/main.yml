@@ -44,13 +44,25 @@ jobs:
 
       - name: TAO TAI KHOAN
         run: |
-          $pass = ConvertTo-SecureString "${{ github.event.inputs.password }}" -AsPlainText -Force
-          New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires
+          $rawPass = "${{ github.event.inputs.password }}"
+          echo "RDP_PASS=$rawPass" >> $env:GITHUB_ENV
+          $pass = ConvertTo-SecureString $rawPass -AsPlainText -Force
+          try {
+            New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
+          } catch {
+            Write-Host "⚠️ Password policy fail, thu password manual..."
+            # Tu dong generate password dam bao complexity
+            $special = [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
+            $p = "AcherLab@" + (-join (1..4 | %{ -join ((48..57) | Get-Random -Count 3 | %{[char]$_}) })) + (-join ($special | Get-Random -Count 2 | %{[char]$_}))
+            $newPass = ConvertTo-SecureString $p -AsPlainText -Force
+            New-LocalUser -Name "AcherLab" -Password $newPass -AccountNeverExpires -PasswordNeverExpires
+            echo "RDP_PASS=$p" >> $env:GITHUB_ENV
+            Write-Host "✅ Password auto-generated: $p"
+          }
           Add-LocalGroupMember -Group "Administrators" -Member "AcherLab"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AcherLab"
           Enable-LocalUser -Name "AcherLab"
           echo "RDP_USER=AcherLab" >> $env:GITHUB_ENV
-          echo "RDP_PASS=${{ github.event.inputs.password }}" >> $env:GITHUB_ENV
 
       - name: BORE TUNNEL TCP 3389
         run: |
