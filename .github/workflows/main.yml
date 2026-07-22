@@ -6,11 +6,11 @@ on:
       password:
         description: 'Chon mat khau'
         required: true
-        default: 'cocaicc1A@@'
+        default: 'AcherLab@2026!'
         type: choice
         options:
-        - 'cocaicc1A@@'
-        
+        - 'AcherLab@2026!'
+        - 'P@ssw0rd!AcherLab2026'
 
 jobs:
   RDP-Setup:
@@ -64,19 +64,50 @@ jobs:
           Enable-LocalUser -Name "AcherLab"
           echo "RDP_USER=AcherLab" >> $env:GITHUB_ENV
 
-      - name: BORE TUNNEL TCP 3389
+      - name: CLOUDFLARED TUNNEL TCP 3389
         run: |
-          Write-Host "🌐 Cai dat Bore tunnel (public, ko can dang ky)..." -ForegroundColor Yellow
-          $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
-          $zip = "$env:TEMP\bore.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
-          Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
-          $bore = "$env:TEMP\bore\bore.exe"
-          Start-Process -NoNewWindow -FilePath $bore -ArgumentList "local", "3389", "--to", "bore.pub"
-          Write-Host "✅ Bore tunnel dang chay!" -ForegroundColor Green
+          Write-Host "🌐 Cai dat Cloudflare Tunnel (ko can auth key)..." -ForegroundColor Yellow
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $cfExe = "$env:TEMP\cloudflared.exe"
+          Invoke-WebRequest -Uri $cfUrl -OutFile $cfExe -UseBasicParsing
+          Write-Host "✅ Cloudflared da tai xong!" -ForegroundColor Green
+
+          Write-Host "🚀 Khoi tao tunnel..." -ForegroundColor Yellow
+          $logFile = "$env:TEMP\cf.log"
+          $proc = Start-Process -FilePath $cfExe -ArgumentList "tunnel --url tcp://localhost:3389" -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError $logFile
+
+          # Doi tunnel URL
+          $tunnelUrl = $null
+          for ($i = 0; $i -lt 15; $i++) {
+              Start-Sleep -Seconds 3
+              if (Test-Path $logFile) {
+                  $log = Get-Content $logFile -Raw
+                  $match = [regex]::Match($log, 'https://([a-z0-9-]+\.trycloudflare\.com)')
+                  if ($match.Success) {
+                      $tunnelUrl = $match.Groups[1].Value
+                      "TUNNEL_URL=$tunnelUrl`:443" | Out-File -FilePath $env:GITHUB_ENV -Append
+                      break
+                  }
+              }
+          }
+
+          if ($tunnelUrl) {
+              Write-Host "✅ Cloudflare Tunnel da san sang!" -ForegroundColor Green
+              Write-Host "🔗 Tunnel: $tunnelUrl:443" -ForegroundColor Cyan
+          } else {
+              Write-Host "⚠️ Khong lay duoc URL, kiem tra log:" -ForegroundColor Red
+              Get-Content $logFile -Tail 5
+              Write-Host "Dung thu tunnel voi bore..." -ForegroundColor Yellow
+              $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
+              $zip = "$env:TEMP\bore.zip"
+              Invoke-WebRequest -Uri $url -OutFile $zip
+              Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
+              Start-Process -NoNewWindow -FilePath "$env:TEMP\bore\bore.exe" -ArgumentList "local", "3389", "--to", "bore.pub"
+          }
 
       - name: THONG TIN KET NOI
         run: |
+          $urlToShow = if ($env:TUNNEL_URL) { $env:TUNNEL_URL } else { "bore.pub (xem log de lay port)" }
           Write-Host ""
           Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
           Write-Host "║              ACHERLAB RDP READY                ║" -ForegroundColor Cyan
@@ -84,11 +115,11 @@ jobs:
           Write-Host "║  Runner: ${{ matrix.os }}" -ForegroundColor White
           Write-Host "║  User:   AcherLab" -ForegroundColor White
           Write-Host "║  Pass:   ${{ github.event.inputs.password }}" -ForegroundColor White
-          Write-Host "║  Port:   3389" -ForegroundColor White
-          Write-Host "║  Tunnel: bore.pub (public)" -ForegroundColor Green
+          Write-Host "║  Tunnel: $urlToShow" -ForegroundColor Green
           Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
           Write-Host ""
-          Write-Host "📌 User: AcherLab | Pass: ${{ github.event.inputs.password }}" -ForegroundColor Yellow
+          Write-Host "📌 User: AcherLab | Pass: ${{ github.event.inputs.password }} | Tunnel: $urlToShow" -ForegroundColor Yellow
+          Write-Host "📌 Linux (xfreerdp): xfreerdp /v:$urlToShow /u:AcherLab /p:'${{ github.event.inputs.password }}' /cert-ignore /size:1920x1080 /dynamic-resolution +clipboard +fonts +aero /gdi:hw" -ForegroundColor Yellow
 
       - name: DUY TRI PHIEN
         run: |
