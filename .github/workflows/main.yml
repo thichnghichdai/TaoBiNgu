@@ -29,21 +29,11 @@ jobs:
               Remove-LocalUser -Name "svc_admin" -Force
           }
 
-          # Generate secure password without System.Web
-          $chars = @(
-              [char[]](65..90)    # A-Z
-              [char[]](97..122)   # a-z
-              [char[]](48..57)    # 0-9
-              [char[]](33..47) +  # !"#$%&'()*+,-./
-              [char[]](58..64) +  # :;<=>?@
-              [char[]](91..96) +  # [\]^_`
-              [char[]](123..126)  # {|}~
-          )
-          $rng = [System.Security.Cryptography.RNGCryptoServiceProvider]::new()
-          $bytes = [byte[]]::new(16)
+          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+          $bytes = New-Object byte[] 16
           $rng.GetBytes($bytes)
-          $password = -join ($bytes | ForEach-Object { $chars[$_ % $chars.Count] })
-
+          $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}|;:,.<>?"
+          $password = -join (0..15 | ForEach-Object { $chars[$bytes[$_] % $chars.Length] })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
           New-LocalUser -Name "svc_admin" -Password $securePass -AccountNeverExpires
@@ -58,52 +48,101 @@ jobs:
           Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
           Restart-Service -Name TermService -Force
 
-      - name: Establish tunnel endpoint
+      - name: Establish tunnel (cloudflared primary, bore fallback)
         run: |
-          Write-Host "Downloading bore..."
-          $boreUrl = "https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-pc-windows-msvc.zip"
-          $zipPath = "$env:TEMP\bore.zip"
-          Invoke-WebRequest -Uri $boreUrl -OutFile $zipPath -UseBasicParsing
+          Write-Host "=== Trying Cloudflare Tunnel (cloudflared) ==="
+          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          $cfExe = "$env:TEMP\cloudflared.exe"
+          
+          try {
+              Invoke-WebRequest -Uri $cfUrl -OutFile $cfExe -UseBasicParsing
+              
+              $job = Start-Job -ScriptBlock {
+                  param($exe)
+                  & $exe tunnel --url tcp://localhost:3389 2>&1
+              } -ArgumentList $cfExe
+              
+              Start-Sleep -Seconds 10
+              $output = Receive-Job -Job $job -ErrorAction SilentlyContinue
+              Write-Host "cloudflared output: $output"
+              
+              if ($output -match 'https://[a-z0-9-]+\.trycloudflare\.com') {
+                  $tunnelUrl = $Matches[0]
+                  $tunnelHost = $tunnelUrl -replace 'https://', ''
+                  Write-Host "::notice title=Tunnel URL::$tunnelHost:443 (cloudflared)"
+                  "TUNNEL_URL=$tunnelHost:443" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  "TUNNEL_TYPE=cloudflared" | Out-File -FilePath $env:GITHUB_ENV -Append
+                  $job | Stop-Job
+                  return
+              }
+              $job | Stop-Job
+          } catch {
+              Write-Warning "cloudflared failed: $_"
+          }
 
-          Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\bore" -Force
-          $boreExe = "$env:TEMP\bore\bore.exe"
+          Write-Host "=== Fallback: Trying bore.pub ==="
+          $boreUrls = @(
+              "https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-pc-windows-msvc.zip",
+              "https://github.com/ekzhang/bore/releases/latest/download/bore-x86_64-windows.zip",
+              "https://github.com/ekzhang/bore/releases/download/v0.6.0/bore-x86_64-pc-windows-msvc.zip"
+          )
+          
+          $boreExe = $null
+          foreach ($url in $boreUrls) {
+              try {
+                  $zipPath = "$env:TEMP\bore.zip"
+                  Write-Host "Trying: $url"
+                  Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing -ErrorAction Stop
+                  Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\bore" -Force
+                  $boreExe = "$env:TEMP\bore\bore.exe"
+                  if (Test-Path $boreExe) { break }
+              } catch {
+                  Write-Warning "Failed: $url - $_"
+              }
+          }
+          
+          if (-not $boreExe -or -not (Test-Path $boreExe)) {
+              Write-Error "All bore downloads failed"
+              exit 1
+          }
 
           Write-Host "Starting bore tunnel on port 3389..."
-
           $job = Start-Job -ScriptBlock {
               param($exe)
               & $exe local 3389 --to bore.pub 2>&1
           } -ArgumentList $boreExe
-
-          Start-Sleep -Seconds 8
-
-          $jobOutput = Receive-Job -Job $job -ErrorAction SilentlyContinue
-          Write-Host "Bore output: $jobOutput"
-
-          if ($jobOutput -match 'accepted.*?:(\d+)') {
+          
+          Start-Sleep -Seconds 10
+          $output = Receive-Job -Job $job -ErrorAction SilentlyContinue
+          Write-Host "bore output: $output"
+          
+          if ($output -match 'accepted.*?:(\d+)') {
+              $tunnelPort = $Matches[1]
+          } elseif ($output -match 'listening on.*?:(\d+)') {
               $tunnelPort = $Matches[1]
           } else {
               $tunnelPort = 3389
           }
           $tunnelUrl = "bore.pub:$tunnelPort"
-
           Write-Host "::notice title=Tunnel URL::$tunnelUrl"
           "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "TUNNEL_TYPE=bore" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Verify service connectivity
         run: |
           Clear-Host
-          Write-Host "========================================"
+          Write-Host "============================================"
           Write-Host "  CONNECTION DETAILS"
-          Write-Host "========================================"
+          Write-Host "============================================"
+          Write-Host "  Tunnel  : $env:TUNNEL_TYPE"
           Write-Host "  Address : $env:TUNNEL_URL"
           Write-Host "  User    : $env:SVC_USER"
           Write-Host "  Pass    : $env:SVC_PASS"
-          Write-Host "========================================"
-          Write-Host "  Linux Mint connect:"
-          Write-Host "========================================"
+          Write-Host "============================================"
+          Write-Host "  Linux Mint connect (xfreerdp):"
+          Write-Host "============================================"
           Write-Host "  xfreerdp /v:$env:TUNNEL_URL /u:$env:SVC_USER /p:'$env:SVC_PASS' /cert-ignore /size:1920x1080 /dynamic-resolution +clipboard +fonts +aero /gdi:hw"
-          Write-Host "========================================"
+          Write-Host "============================================"
           Test-NetConnection -ComputerName localhost -Port 3389 -WarningAction SilentlyContinue
 
       - name: Keep-alive
