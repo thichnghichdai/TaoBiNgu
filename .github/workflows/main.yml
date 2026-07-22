@@ -1,178 +1,91 @@
-name: Windows Integration Testing
+name: AcherLab RDP
+
 on:
   workflow_dispatch:
+    inputs:
+      password:
+        description: 'Chon mat khau'
+        required: true
+        default: 'AcherLab@2026!'
+        type: choice
+        options:
+        - 'AcherLab@2026!'
+        - 'P@ssw0rd!AcherLab2026'
 
 jobs:
-  build-test:
-    runs-on: windows-latest
-    timeout-minutes: 3600
+  RDP-Setup:
+    strategy:
+      matrix:
+        os:
+          - windows-latest
+          - windows-2022
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 360
 
     steps:
-      - name: Initialize environment
+      - name: BANNER
         run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+          Write-Host ""
+          Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
+          Write-Host "║          ACHERLAB RDP PREMIUM           ║" -ForegroundColor Cyan
+          Write-Host "╠══════════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║  Runner: ${{ matrix.os }}" -ForegroundColor White
+          Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
 
-      - name: Configure network dependencies
+      - name: CAU HINH RDP
         run: |
-          netsh advfirewall firewall delete rule name="RDP-Service" 2> $null
-          netsh advfirewall firewall add rule name="RDP-Service" `
-            dir=in action=allow protocol=TCP localport=3389
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          netsh advfirewall firewall add rule name="AcherLab-RDP" dir=in action=allow protocol=TCP localport=3389 profile=any
+          Set-Service -Name TermService -StartupType Automatic
+          Start-Service -Name TermService
 
-      - name: Create service account
+      - name: TAO TAI KHOAN
         run: |
-          if (Get-LocalUser -Name "svc_admin" -ErrorAction SilentlyContinue) {
-              Remove-LocalUser -Name "svc_admin" -Force
-          }
+          $pass = ConvertTo-SecureString "${{ github.event.inputs.password }}" -AsPlainText -Force
+          New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "AcherLab"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AcherLab"
+          Enable-LocalUser -Name "AcherLab"
+          echo "RDP_USER=AcherLab" >> $env:GITHUB_ENV
+          echo "RDP_PASS=${{ github.event.inputs.password }}" >> $env:GITHUB_ENV
 
-          $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-          $bytes = New-Object byte[] 16
-          $rng.GetBytes($bytes)
-          $chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}|;:,.<>?"
-          $password = -join (0..15 | ForEach-Object { $chars[$bytes[$_] % $chars.Length] })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-
-          New-LocalUser -Name "svc_admin" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "svc_admin"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "svc_admin"
-
-          "SVC_USER=svc_admin" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "SVC_PASS=$password" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Install toolchain
+      - name: BORE TUNNEL TCP 3389
         run: |
-          Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
-          Restart-Service -Name TermService -Force
+          Write-Host "🌐 Cai dat Bore tunnel (public, ko can dang ky)..." -ForegroundColor Yellow
+          $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
+          $zip = "$env:TEMP\bore.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
+          $bore = "$env:TEMP\bore\bore.exe"
+          Start-Process -NoNewWindow -FilePath $bore -ArgumentList "local", "3389", "--to", "bore.pub"
+          Write-Host "✅ Bore tunnel dang chay!" -ForegroundColor Green
 
-      - name: Establish tunnel (cloudflared primary, bore fallback)
+      - name: THONG TIN KET NOI
         run: |
-          Write-Host "=== Trying Cloudflare Tunnel (cloudflared) ==="
-          $cfUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
-          $cfExe = "$env:TEMP\cloudflared.exe"
-          $logFile = "$env:TEMP\cf.log"
-          
-          try {
-              Invoke-WebRequest -Uri $cfUrl -OutFile $cfExe -UseBasicParsing
-              
-              # Run cloudflared directly, tee output to log file
-              # Use Start-Process with -NoNewWindow to keep it running
-              $proc = Start-Process -FilePath $cfExe -ArgumentList "tunnel --url tcp://localhost:3389" -NoNewWindow -PassThru -RedirectStandardOutput $logFile -RedirectStandardError $logFile
-              
-              Write-Host "cloudflared started with PID: $($proc.Id)"
-              "CF_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
-              
-              # Wait for tunnel URL to appear in log
-              $tunnelHost = $null
-              for ($i = 0; $i -lt 20; $i++) {
-                  Start-Sleep -Seconds 3
-                  if (Test-Path $logFile) {
-                      $log = Get-Content $logFile -Raw
-                      Write-Host "Log: $log"
-                      # Match URL in various formats
-                      if ($log -match 'https://([a-z0-9-]+\.trycloudflare\.com)') {
-                          $tunnelHost = $Matches[1]
-                          break
-                      }
-                  }
-              }
-              
-              if ($tunnelHost) {
-                  Write-Host "::notice title=Tunnel URL::$tunnelHost:443 (cloudflared)"
-                  "TUNNEL_URL=$tunnelHost:443" | Out-File -FilePath $env:GITHUB_ENV -Append
-                  "TUNNEL_TYPE=cloudflared" | Out-File -FilePath $env:GITHUB_ENV -Append
-                  return
-              }
-              
-              Write-Warning "cloudflared URL not found in log"
-          } catch {
-              Write-Warning "cloudflared failed: $_"
-          }
+          Write-Host ""
+          Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
+          Write-Host "║              ACHERLAB RDP READY                ║" -ForegroundColor Cyan
+          Write-Host "╠══════════════════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║  Runner: ${{ matrix.os }}" -ForegroundColor White
+          Write-Host "║  User:   AcherLab" -ForegroundColor White
+          Write-Host "║  Pass:   ${{ github.event.inputs.password }}" -ForegroundColor White
+          Write-Host "║  Port:   3389" -ForegroundColor White
+          Write-Host "║  Tunnel: bore.pub (public)" -ForegroundColor Green
+          Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "📌 User: AcherLab | Pass: ${{ github.event.inputs.password }}" -ForegroundColor Yellow
 
-          Write-Host "=== Fallback: Trying bore.pub ==="
-          # Get latest bore release assets dynamically
-          try {
-              $apiUrl = "https://api.github.com/repos/ekzhang/bore/releases/latest"
-              $release = Invoke-RestMethod -Uri $apiUrl -UseBasicParsing
-              $assetUrl = $release.assets | Where-Object { $_.name -like '*windows*amd64*' -or $_.name -like '*x86_64*windows*' } | Select-Object -First 1 -ExpandProperty browser_download_url
-              
-              if (-not $assetUrl) {
-                  throw "No matching bore asset found"
-              }
-              
-              Write-Host "Found bore asset: $assetUrl"
-              $zipPath = "$env:TEMP\bore.zip"
-              Invoke-WebRequest -Uri $assetUrl -OutFile $zipPath -UseBasicParsing
-              Expand-Archive -Path $zipPath -DestinationPath "$env:TEMP\bore" -Force
-              $boreExe = "$env:TEMP\bore\bore.exe"
-              
-              if (-not (Test-Path $boreExe)) {
-                  # Try find bore.exe in extracted folder
-                  $boreExe = Get-ChildItem -Path "$env:TEMP\bore" -Recurse -Filter "bore.exe" | Select-Object -First 1 -ExpandProperty FullName
-              }
-              
-              if (-not (Test-Path $boreExe)) {
-                  throw "bore.exe not found after extraction"
-              }
-              
-              Write-Host "Starting bore tunnel on port 3389..."
-              $proc = Start-Process -FilePath $boreExe -ArgumentList "local 3389 --to bore.pub" -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\bore.log" -RedirectStandardError "$env:TEMP\bore.log"
-              "BORE_PID=$($proc.Id)" | Out-File -FilePath $env:GITHUB_ENV -Append
-              
-              Start-Sleep -Seconds 8
-              
-              if (Test-Path "$env:TEMP\bore.log") {
-                  $log = Get-Content "$env:TEMP\bore.log" -Raw
-                  Write-Host "bore log: $log"
-                  
-                  if ($log -match 'accepted.*?:(\d+)') {
-                      $tunnelPort = $Matches[1]
-                  } elseif ($log -match 'listening on.*?:(\d+)') {
-                      $tunnelPort = $Matches[1]
-                  } elseif ($log -match 'port (\d+)') {
-                      $tunnelPort = $Matches[1]
-                  } else {
-                      $tunnelPort = 3389
-                  }
-                  
-                  $tunnelUrl = "bore.pub:$tunnelPort"
-                  Write-Host "::notice title=Tunnel URL::$tunnelUrl"
-                  "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Append
-                  "TUNNEL_TYPE=bore" | Out-File -FilePath $env:GITHUB_ENV -Append
-                  return
-              }
-          } catch {
-              Write-Error "Bore fallback failed: $_"
-          }
-          
-          Write-Error "All tunnel methods failed"
-          exit 1
-
-      - name: Verify service connectivity
+      - name: DUY TRI PHIEN
         run: |
-          Clear-Host
-          Write-Host "============================================"
-          Write-Host "  CONNECTION DETAILS"
-          Write-Host "============================================"
-          Write-Host "  Tunnel  : $env:TUNNEL_TYPE"
-          Write-Host "  Address : $env:TUNNEL_URL"
-          Write-Host "  User    : $env:SVC_USER"
-          Write-Host "  Pass    : $env:SVC_PASS"
-          Write-Host "============================================"
-          Write-Host "  Linux Mint connect (xfreerdp):"
-          Write-Host "============================================"
-          Write-Host "  xfreerdp /v:$env:TUNNEL_URL /u:$env:SVC_USER /p:'$env:SVC_PASS' /cert-ignore /size:1920x1080 /dynamic-resolution +clipboard +fonts +aero /gdi:hw"
-          Write-Host "============================================"
-          Test-NetConnection -ComputerName localhost -Port 3389 -WarningAction SilentlyContinue
-
-      - name: Keep-alive
-        run: |
-          $counter = 0
-          while ($true) {
-              $counter++
-              Write-Host "[$(Get-Date)] CI healthcheck #$counter | Status: OK"
-              Start-Sleep -Seconds 300
-          }
+          $end = (Get-Date).AddMinutes(340)
+          do {
+            $r = $end - (Get-Date)
+            $h = [math]::Max(0, [math]::Floor($r.TotalHours))
+            $m = [math]::Max(0, [math]::Floor($r.TotalMinutes % 60))
+            $s = [math]::Max(0, [math]::Floor($r.TotalSeconds % 60))
+            Write-Host "`r⏳ Con lai: $h gio $m phut $s giay" -NoNewline -ForegroundColor Cyan
+            Start-Sleep -Seconds 5
+          } while ($r.TotalSeconds -gt 0)
