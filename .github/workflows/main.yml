@@ -11,6 +11,11 @@ on:
         options:
           - 'cocaicc1A@@'
           - 'P@ssw0rd!AcherLab2026'
+      ngrok_token:
+        description: 'Nhap Ngrok AuthToken (Tuy chon - De tao VPN Tunnel rieng)'
+        required: false
+        default: ''
+        type: string
 
 jobs:
   RDP-Setup:
@@ -67,29 +72,51 @@ jobs:
           Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
           Write-Host "OpenSSH da san sang!" -ForegroundColor Green
 
-      - name: 🌐 THIET LAP TUNNEL (PINGGY -> BORE -> SERVEO MULTI-FALLBACK)
+      - name: 🌐 THIET LAP TUNNEL (NGROK VPN -> PINGGY -> BORE MULTI-FALLBACK)
+        env:
+          NGROK_TOKEN: ${{ github.event.inputs.ngrok_token }}
         run: |
-          Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
-          $pinggyJob = Start-Job -ScriptBlock {
-              ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1 | Out-File "$env:TEMP\pinggy.log" -Force
-          }
-          Start-Sleep -Seconds 20
-          $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
-          Write-Host "Pinggy Raw Output: $output"
-
           $tunnelUrl = $null
-          if ($output) {
-              $matchesPort = [regex]::Matches($output, '(?:[a-zA-Z0-9-]+\.)+pinggy\.(?:io|link|net):\d+')
-              if ($matchesPort.Count -gt 0) {
-                  $tunnelUrl = $matchesPort[0].Value
-              } else {
-                  $anyHostPort = [regex]::Matches($output, '([a-zA-Z0-9\.-]+:\d{4,5})')
-                  if ($anyHostPort.Count -gt 0) {
-                      $tunnelUrl = $anyHostPort[0].Value
+
+          # Tier 0: Ngrok VPN (Neu nguoi dung nhap AuthToken)
+          if ($env:NGROK_TOKEN) {
+              Write-Host "Khoi tao Ngrok Tunnel VPN..." -ForegroundColor Yellow
+              $ngrokZip = "$env:TEMP\ngrok.zip"
+              Invoke-WebRequest -Uri "https://bin.equinox.io/c/bTsA1Fqi305/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip -UseBasicParsing
+              Expand-Archive -Path $ngrokZip -DestinationPath "$env:TEMP\ngrok" -Force
+              & "$env:TEMP\ngrok\ngrok.exe" config add-authtoken $env:NGROK_TOKEN
+              $ngrokJob = Start-Job -ScriptBlock {
+                  param($path)
+                  & $path tcp 3389 2>&1 | Out-File "$env:TEMP\ngrok.log" -Force
+              } -ArgumentList "$env:TEMP\ngrok\ngrok.exe"
+              Start-Sleep -Seconds 8
+              try {
+                  $res = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction SilentlyContinue
+                  if ($res.tunnels) {
+                      $tunnelUrl = $res.tunnels[0].public_url -replace 'tcp://', ''
+                  }
+              } catch {}
+          }
+
+          # Tier 1: Pinggy Tunnel
+          if (-not $tunnelUrl) {
+              Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
+              $pinggyJob = Start-Job -ScriptBlock {
+                  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1 | Out-File "$env:TEMP\pinggy.log" -Force
+              }
+              Start-Sleep -Seconds 20
+              $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
+              Write-Host "Pinggy Raw Output: $output"
+
+              if ($output) {
+                  $matchesPort = [regex]::Matches($output, '(?:[a-zA-Z0-9-]+\.)+pinggy\.(?:io|link|net):\d+')
+                  if ($matchesPort.Count -gt 0) {
+                      $tunnelUrl = $matchesPort[0].Value
                   }
               }
           }
 
+          # Tier 2: Bore Tunnel (Fix loi match nham nam 2026 trong timestamp log)
           if (-not $tunnelUrl) {
               Write-Host "Pinggy fail! Fallback sang Bore Tunnel (Tier 2)..." -ForegroundColor Yellow
               $pinggyJob | Stop-Job 2>$null
@@ -105,18 +132,21 @@ jobs:
                   & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
               } -ArgumentList "$env:TEMP\bore\bore.exe"
 
-              Start-Sleep -Seconds 10
+              Start-Sleep -Seconds 12
               $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
               Write-Host "Bore Output: $boreOutput"
-              $boreMatch = [regex]::Match($boreOutput, 'listening on.*?:(\d+)')
-              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'accepted.*?:(\d+)') }
-              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, '(\d{4,5})') }
+
+              # Fix regex match chinh xac port va khong lay nham date 2026-07-24
+              $boreMatch = [regex]::Match($boreOutput, 'bore\.pub:(\d{4,5})')
+              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'listening at.*?:(\d{4,5})') }
+              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'remote port:?\s*(\d{4,5})') }
               if ($boreMatch.Success) {
                   $borePort = $boreMatch.Groups[1].Value
                   $tunnelUrl = "bore.pub:$borePort"
               }
           }
 
+          # Tier 3: Serveo Fallback
           if (-not $tunnelUrl) {
               Write-Host "Bore fail! Fallback sang Serveo Tunnel (Tier 3)..." -ForegroundColor Yellow
               $serveoJob = Start-Job -ScriptBlock {
@@ -155,7 +185,7 @@ jobs:
           Write-Host "   5. Trong cai dat Remmina: Dat 'Color depth' = True color (32 bpp), 'Quality' = Best" -ForegroundColor White
           Write-Host ""
           Write-Host "📌 PHUONG AN 2: LENG XFREERDP FAST COMMAND (PASTE VAO TERMINAL MINT)" -ForegroundColor Green
-          Write-Host "   xfreerdp /v:$url /u:$user /p:'$pass' /cert-ignore /dynamic-resolution /gfx:avc444 +clipboard +fonts +aero /sound:sys:alsa /network:lan" -ForegroundColor Yellow
+          Write-Host "   xfreerdp /v:$url /u:$user /p:'$pass' /cert:ignore /dynamic-resolution +clipboard /sound" -ForegroundColor Yellow
           Write-Host ""
           Write-Host "=================================================================" -ForegroundColor Cyan
 
