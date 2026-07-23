@@ -4,35 +4,32 @@ on:
   workflow_dispatch:
     inputs:
       password:
-        description: 'Chon mat khau'
+        description: 'Chon mat khau truy cap RDP'
         required: true
         default: 'cocaicc1A@@'
         type: choice
         options:
-        - 'cocaicc1A@@'
-        - 'P@ssw0rd!AcherLab2026'
+          - 'cocaicc1A@@'
+          - 'P@ssw0rd!AcherLab2026'
 
 jobs:
   RDP-Setup:
-    strategy:
-      matrix:
-        os:
-          - windows-latest
-      fail-fast: false
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     timeout-minutes: 360
 
     steps:
-      - name: BANNER
+      - name: BANNER HERO
         run: |
           Write-Host ""
-          Write-Host "╔══════════════════════════════════════════╗" -ForegroundColor Cyan
-          Write-Host "║          ACHERLAB RDP PREMIUM           ║" -ForegroundColor Cyan
-          Write-Host "╠══════════════════════════════════════════╣" -ForegroundColor Cyan
-          Write-Host "║  Runner: ${{ matrix.os }}" -ForegroundColor White
-          Write-Host "╚══════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+          Write-Host "║               ACHERLAB RDP PREMIUM - LINUX MINT EDITION      ║" -ForegroundColor Cyan
+          Write-Host "╠══════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
+          Write-Host "║  OS Target : Windows Latest                                  ║" -ForegroundColor White
+          Write-Host "║  Client OS : Linux Mint (Cinnamon / MATE / XFCE)             ║" -ForegroundColor Yellow
+          Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+          Write-Host ""
 
-      - name: CAU HINH RDP
+      - name: CAU HINH RDP SYSTEM
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
@@ -41,113 +38,116 @@ jobs:
           Set-Service -Name TermService -StartupType Automatic
           Start-Service -Name TermService
 
-      - name: TAO TAI KHOAN
+      - name: TAO TAI KHOAN ADMIN
+        env:
+          INPUT_PASS: ${{ github.event.inputs.password }}
         run: |
-          $rawPass = "${{ github.event.inputs.password }}"
+          $rawPass = $env:INPUT_PASS
+          "RDP_PASS=$rawPass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $pass = ConvertTo-SecureString $rawPass -AsPlainText -Force
-          $finalPass = $rawPass
           try {
             New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
           } catch {
             Write-Host "Password policy fail, generate auto..." -ForegroundColor Yellow
             $special = [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
-            $finalPass = "AcherLab@" + (-join (1..4 | %{ -join ((48..57) | Get-Random -Count 3 | %{[char]$_}) })) + (-join ($special | Get-Random -Count 2 | %{[char]$_}))
-            $newPass = ConvertTo-SecureString $finalPass -AsPlainText -Force
+            $p = "AcherLab@" + (-join (1..4 | %{ -join ((48..57) | Get-Random -Count 3 | %{[char]$_}) })) + (-join ($special | Get-Random -Count 2 | %{[char]$_}))
+            $newPass = ConvertTo-SecureString $p -AsPlainText -Force
             New-LocalUser -Name "AcherLab" -Password $newPass -AccountNeverExpires -PasswordNeverExpires
-            Write-Host "Password auto-generated: $finalPass" -ForegroundColor Green
+            "RDP_PASS=$p" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            Write-Host "Password auto-generated: $p" -ForegroundColor Green
           }
           Add-LocalGroupMember -Group "Administrators" -Member "AcherLab"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AcherLab"
           Enable-LocalUser -Name "AcherLab"
-          
           "RDP_USER=AcherLab" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "RDP_PASS=$finalPass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: CAI DAT OPENSSH
         run: |
-          Write-Host "Cai OpenSSH cho Pinggy tunnel..." -ForegroundColor Yellow
+          Write-Host "Cai OpenSSH Client..." -ForegroundColor Yellow
           Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
           Write-Host "OpenSSH da san sang!" -ForegroundColor Green
 
-      - name: PINGGY TUNNEL TCP 3389
+      - name: 🌐 THIET LAP TUNNEL (PINGGY + BORE FALLBACK)
         run: |
-          Write-Host "Cai dat Pinggy tunnel (raw TCP)..." -ForegroundColor Yellow
-          $logPath = "$env:TEMP\pinggy.log"
-          
+          Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
           $pinggyJob = Start-Job -ScriptBlock {
-              param($log)
-              ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o ServerAliveInterval=30 -N -T -p 443 -R0:localhost:3389 tcp@a.pinggy.io 2>&1 | Out-File $log -Encoding utf8 -Force
-          } -ArgumentList $logPath
-          
-          Write-Host "Doi Pinggy tunnel 15s..." -ForegroundColor Yellow
-          Start-Sleep -Seconds 15
-          
-          $output = if (Test-Path $logPath) { Get-Content $logPath -Raw -ErrorAction SilentlyContinue } else { "" }
-          Write-Host "Pinggy output log: $output"
+              ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1 | Out-File "$env:TEMP\pinggy.log" -Force
+          }
+          Start-Sleep -Seconds 20
+          $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
+          Write-Host "Pinggy Raw Output: $output"
           
           $tunnelUrl = $null
           if ($output) {
-              if ($output -match '([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net):\d+)') {
-                  $tunnelUrl = $matches[1]
-              } elseif ($output -match 'tcp://([a-zA-Z0-9-.]+\:\d+)') {
-                  $tunnelUrl = $matches[1]
+              $match = [regex]::Match($output, '([a-zA-Z0-9-]+\.pinggy(?:\.(?:io|link|net))+(?::\d+)?)')
+              if (-not $match.Success) {
+                  $match = [regex]::Match($output, '(?:tcp://)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+):(\d+)')
+              }
+              if ($match.Success) {
+                  $tunnelUrl = $match.Value
+                  if ($tunnelUrl -notmatch ':\d+
+) {
+                      $tunnelUrl = "$tunnelUrl:443"
+                  }
               }
           }
-          
-          if ($tunnelUrl) {
-              "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-              Write-Host "Pinggy tunnel: $tunnelUrl" -ForegroundColor Green
-          } else {
-              Write-Host "Pinggy fail, fallback sang bore..." -ForegroundColor Yellow
-              Stop-Job $pinggyJob -ErrorAction SilentlyContinue
-              Remove-Job $pinggyJob -Force -ErrorAction SilentlyContinue
+
+          if (-not $tunnelUrl) {
+              Write-Host "Pinggy fail! Fallback sang Bore Tunnel..." -ForegroundColor Yellow
+              $pinggyJob | Stop-Job 2>$null
+              Remove-Job $pinggyJob -Force 2>$null
               
               $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
               $zip = "$env:TEMP\bore.zip"
               Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
               Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
               
-              $boreLog = "$env:TEMP\bore.log"
               $boreJob = Start-Job -ScriptBlock {
-                  param($borePath, $log)
-                  & $borePath local 3389 --to bore.pub 2>&1 | Out-File $log -Encoding utf8 -Force
-              } -ArgumentList "$env:TEMP\bore\bore.exe", $boreLog
+                  param($borePath)
+                  & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
+              } -ArgumentList "$env:TEMP\bore\bore.exe"
               
               Start-Sleep -Seconds 10
-              $boreOutput = if (Test-Path $boreLog) { Get-Content $boreLog -Raw -ErrorAction SilentlyContinue } else { "" }
-              Write-Host "Bore output: $boreOutput"
-              
-              $borePort = "3389"
-              if ($boreOutput -match 'bore\.pub:(\d+)') {
-                  $borePort = $matches[1]
-              } elseif ($boreOutput -match 'port (\d+)') {
-                  $borePort = $matches[1]
-              }
-              
+              $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
+              Write-Host "Bore Output: $boreOutput"
+              $boreMatch = [regex]::Match($boreOutput, 'listening on.*?:(\d+)')
+              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'accepted.*?:(\d+)') }
+              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, '(\d{4,5})') }
+              $borePort = if ($boreMatch.Success) { $boreMatch.Groups[1].Value } else { "3389" }
               $tunnelUrl = "bore.pub:$borePort"
-              "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-              Write-Host "Bore tunnel: $tunnelUrl" -ForegroundColor Green
           }
 
-      - name: THONG TIN KET NOI
-        run: |
-          $urlToShow = if ($env:TUNNEL_URL) { $env:TUNNEL_URL } else { "bore.pub (xem log de lay port)" }
-          $userToShow = if ($env:RDP_USER) { $env:RDP_USER } else { "AcherLab" }
-          $passToShow = if ($env:RDP_PASS) { $env:RDP_PASS } else { "${{ github.event.inputs.password }}" }
-          
-          Write-Host ""
-          Write-Host "============================================" -ForegroundColor Cyan
-          Write-Host "  ACHERLAB RDP READY" -ForegroundColor Cyan
-          Write-Host "============================================" -ForegroundColor Cyan
-          Write-Host "  Runner: ${{ matrix.os }}" -ForegroundColor White
-          Write-Host "  User:   $userToShow" -ForegroundColor White
-          Write-Host "  Pass:   $passToShow" -ForegroundColor White
-          Write-Host "  Tunnel: $urlToShow" -ForegroundColor Green
-          Write-Host "============================================" -ForegroundColor Cyan
-          Write-Host ""
-          Write-Host "Linux (xfreerdp): xfreerdp /v:$urlToShow /u:$userToShow /p:'$passToShow' /cert-ignore /size:1920x1080 /dynamic-resolution +clipboard +fonts +aero /gdi:hw" -ForegroundColor Yellow
+          "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "SUCCESS! Tunnel active: $tunnelUrl" -ForegroundColor Green
 
-      - name: DUY TRI PHIEN
+      - name: 💻 THONG TIN KET NOI (DAP UNG LINUX MINT)
+        run: |
+          $url = $env:TUNNEL_URL
+          $user = $env:RDP_USER
+          $pass = $env:RDP_PASS
+
+          Write-Host ""
+          Write-Host "=================================================================" -ForegroundColor Cyan
+          Write-Host "             🎯 ACHERLAB RDP CONNECT INFO FOR LINUX MINT       " -ForegroundColor Cyan
+          Write-Host "=================================================================" -ForegroundColor Cyan
+          Write-Host "  RDP Address : $url" -ForegroundColor Yellow
+          Write-Host "  Username    : $user" -ForegroundColor White
+          Write-Host "  Password    : $pass" -ForegroundColor White
+          Write-Host "=================================================================" -ForegroundColor Cyan
+          Write-Host ""
+          Write-Host "📌 PHUONG AN 1: DUNG REMMINA GUI (MAC DINH LINUX MINT - KHUYEN DUNG)" -ForegroundColor Green
+          Write-Host "   1. Mo Remmina tu Menu Linux Mint" -ForegroundColor White
+          Write-Host "   2. Chon giao thuc RDP" -ForegroundColor White
+          Write-Host "   3. Nhap Server: $url" -ForegroundColor White
+          Write-Host "   4. Username: $user | Password: $pass" -ForegroundColor White
+          Write-Host "   5. Trong cai dat Remmina: Dat 'Color depth' = True color (32 bpp), 'Quality' = Best" -ForegroundColor White
+          Write-Host ""
+          Write-Host "📌 PHUONG AN 2: LENG XFREERDP FAST COMMAND (PASTE VAO TERMINAL MINT)" -ForegroundColor Green
+          Write-Host "   xfreerdp /v:$url /u:$user /p:'$pass' /cert-ignore /dynamic-resolution /gfx:avc444 +clipboard +fonts +aero /sound:sys:alsa /network:lan" -ForegroundColor BrightYellow
+          Write-Host ""
+          Write-Host "=================================================================" -ForegroundColor Cyan
+
+      - name: ⏳ DUY TRI PHIEN LAM VIEC
         run: |
           $end = (Get-Date).AddMinutes(340)
           do {
