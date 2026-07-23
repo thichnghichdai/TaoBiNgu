@@ -1,4 +1,4 @@
-name: AcherLab RDP
+name: AcherLab RDP Premium
 
 on:
   workflow_dispatch:
@@ -67,7 +67,7 @@ jobs:
           Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
           Write-Host "OpenSSH da san sang!" -ForegroundColor Green
 
-      - name: 🌐 THIET LAP TUNNEL (PINGGY + BORE FALLBACK)
+      - name: 🌐 THIET LAP TUNNEL (PINGGY -> BORE -> SERVEO MULTI-FALLBACK)
         run: |
           Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
           $pinggyJob = Start-Job -ScriptBlock {
@@ -76,46 +76,60 @@ jobs:
           Start-Sleep -Seconds 20
           $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
           Write-Host "Pinggy Raw Output: $output"
-          
+
           $tunnelUrl = $null
           if ($output) {
-              $match = [regex]::Match($output, '([a-zA-Z0-9-]+\.pinggy(?:\.(?:io|link|net))+(?::\d+)?)')
-              if (-not $match.Success) {
-                  $match = [regex]::Match($output, '(?:tcp://)?([a-zA-Z0-9-]+(?:\.[a-zA-Z0-9-]+)+):(\d+)')
-              }
-              if ($match.Success) {
-                  $tunnelUrl = $match.Value
-                  if ($tunnelUrl -notmatch ':\d+
+              if ($output -match '([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net):\d+)') {
+                  $tunnelUrl = $Matches[1]
+              } elseif ($output -match 'tcp://([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net):\d+)') {
+                  $tunnelUrl = $Matches[1]
+              } elseif ($output -match '([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net))') {
+                  $tunnelUrl = "$($Matches[1]):3389"
               }
           }
 
           if (-not $tunnelUrl) {
-              Write-Host "Pinggy fail! Fallback sang Bore Tunnel..." -ForegroundColor Yellow
+              Write-Host "Pinggy fail! Fallback sang Bore Tunnel (Tier 2)..." -ForegroundColor Yellow
               $pinggyJob | Stop-Job 2>$null
               Remove-Job $pinggyJob -Force 2>$null
-              
+
               $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
               $zip = "$env:TEMP\bore.zip"
               Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
               Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
-              
+
               $boreJob = Start-Job -ScriptBlock {
                   param($borePath)
                   & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
               } -ArgumentList "$env:TEMP\bore\bore.exe"
-              
+
               Start-Sleep -Seconds 10
               $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
               Write-Host "Bore Output: $boreOutput"
               $boreMatch = [regex]::Match($boreOutput, 'listening on.*?:(\d+)')
               if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'accepted.*?:(\d+)') }
               if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, '(\d{4,5})') }
-              $borePort = if ($boreMatch.Success) { $boreMatch.Groups[1].Value } else { "3389" }
-              $tunnelUrl = "bore.pub:$borePort"
+              if ($boreMatch.Success) {
+                  $borePort = $boreMatch.Groups[1].Value
+                  $tunnelUrl = "bore.pub:$borePort"
+              }
+          }
+
+          if (-not $tunnelUrl) {
+              Write-Host "Bore fail! Fallback sang Serveo Tunnel (Tier 3)..." -ForegroundColor Yellow
+              $serveoJob = Start-Job -ScriptBlock {
+                  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -R 0:localhost:3389 serveo.net 2>&1 | Out-File "$env:TEMP\serveo.log" -Force
+              }
+              Start-Sleep -Seconds 15
+              $serveoOutput = if (Test-Path "$env:TEMP\serveo.log") { Get-Content "$env:TEMP\serveo.log" -Raw } else { "" }
+              Write-Host "Serveo Output: $serveoOutput"
+              if ($serveoOutput -match 'serveo\.net:(\d+)') {
+                  $tunnelUrl = "serveo.net:$($Matches[1])"
+              }
           }
 
           "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "SUCCESS! Tunnel active: $tunnelUrl" -ForegroundColor Green
+          Write-Host "SUCCESS! Active Tunnel Address: $tunnelUrl" -ForegroundColor Green
 
       - name: 💻 THONG TIN KET NOI (DAP UNG LINUX MINT)
         run: |
