@@ -81,8 +81,9 @@ jobs:
           # Tier 0: Ngrok VPN (Neu nguoi dung nhap AuthToken)
           if ($env:NGROK_TOKEN) {
               Write-Host "Khoi tao Ngrok Tunnel VPN..." -ForegroundColor Yellow
+              $ngrokUrl = "https://cdn.ngrok.com/ngrok-v3-stable-windows-amd64.zip"
               $ngrokZip = "$env:TEMP\ngrok.zip"
-              Invoke-WebRequest -Uri "https://bin.equinox.io/c/bTsA1Fqi305/ngrok-v3-stable-windows-amd64.zip" -OutFile $ngrokZip -UseBasicParsing
+              Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokZip -UseBasicParsing
               Expand-Archive -Path $ngrokZip -DestinationPath "$env:TEMP\ngrok" -Force
               & "$env:TEMP\ngrok\ngrok.exe" config add-authtoken $env:NGROK_TOKEN
               $ngrokJob = Start-Job -ScriptBlock {
