@@ -79,12 +79,14 @@ jobs:
 
           $tunnelUrl = $null
           if ($output) {
-              if ($output -match '([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net):\d+)') {
-                  $tunnelUrl = $Matches[1]
-              } elseif ($output -match 'tcp://([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net):\d+)') {
-                  $tunnelUrl = $Matches[1]
-              } elseif ($output -match '([a-zA-Z0-9-]+\.pinggy\.(?:io|link|net))') {
-                  $tunnelUrl = "$($Matches[1]):3389"
+              $matchesPort = [regex]::Matches($output, '(?:[a-zA-Z0-9-]+\.)+pinggy\.(?:io|link|net):\d+')
+              if ($matchesPort.Count -gt 0) {
+                  $tunnelUrl = $matchesPort[0].Value
+              } else {
+                  $anyHostPort = [regex]::Matches($output, '([a-zA-Z0-9\.-]+:\d{4,5})')
+                  if ($anyHostPort.Count -gt 0) {
+                      $tunnelUrl = $anyHostPort[0].Value
+                  }
               }
           }
 
@@ -145,7 +147,6 @@ jobs:
           Write-Host "  Username    : $user" -ForegroundColor White
           Write-Host "  Password    : $pass" -ForegroundColor White
           Write-Host "=================================================================" -ForegroundColor Cyan
-          Write-Host ""
           Write-Host "📌 PHUONG AN 1: DUNG REMMINA GUI (MAC DINH LINUX MINT - KHUYEN DUNG)" -ForegroundColor Green
           Write-Host "   1. Mo Remmina tu Menu Linux Mint" -ForegroundColor White
           Write-Host "   2. Chon giao thuc RDP" -ForegroundColor White
@@ -154,7 +155,7 @@ jobs:
           Write-Host "   5. Trong cai dat Remmina: Dat 'Color depth' = True color (32 bpp), 'Quality' = Best" -ForegroundColor White
           Write-Host ""
           Write-Host "📌 PHUONG AN 2: LENG XFREERDP FAST COMMAND (PASTE VAO TERMINAL MINT)" -ForegroundColor Green
-          Write-Host "   xfreerdp /v:$url /u:$user /p:'$pass' /cert-ignore /dynamic-resolution /gfx:avc444 +clipboard +fonts +aero /sound:sys:alsa /network:lan" -ForegroundColor BrightYellow
+          Write-Host "   xfreerdp /v:$url /u:$user /p:'$pass' /cert-ignore /dynamic-resolution /gfx:avc444 +clipboard +fonts +aero /sound:sys:alsa /network:lan" -ForegroundColor Yellow
           Write-Host ""
           Write-Host "=================================================================" -ForegroundColor Cyan
 
