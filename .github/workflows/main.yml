@@ -86,9 +86,6 @@ jobs:
               if ($match.Success) {
                   $tunnelUrl = $match.Value
                   if ($tunnelUrl -notmatch ':\d+
-) {
-                      $tunnelUrl = "$tunnelUrl:443"
-                  }
               }
           }
 
