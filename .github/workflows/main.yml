@@ -72,93 +72,121 @@ jobs:
           Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
           Write-Host "OpenSSH da san sang!" -ForegroundColor Green
 
-      - name: 🌐 THIET LAP TUNNEL (NGROK VPN -> PINGGY -> BORE MULTI-FALLBACK)
+      - name: 🌐 THIET LAP TUNNEL (CHOP NHANG MULTI-TIER FALLBACK - UNCRASHABLE)
         env:
           NGROK_TOKEN: ${{ github.event.inputs.ngrok_token }}
         run: |
           $tunnelUrl = $null
 
-          # Tier 0: Ngrok VPN (Neu nguoi dung nhap AuthToken)
+          # Tier 0: Ngrok VPN via Chocolatey (Neu co AuthToken)
           if ($env:NGROK_TOKEN) {
-              Write-Host "Khoi tao Ngrok Tunnel VPN..." -ForegroundColor Yellow
-              $ngrokUrl = "https://cdn.ngrok.com/ngrok-v3-stable-windows-amd64.zip"
-              $ngrokZip = "$env:TEMP\ngrok.zip"
-              Invoke-WebRequest -Uri $ngrokUrl -OutFile $ngrokZip -UseBasicParsing
-              Expand-Archive -Path $ngrokZip -DestinationPath "$env:TEMP\ngrok" -Force
-              & "$env:TEMP\ngrok\ngrok.exe" config add-authtoken $env:NGROK_TOKEN
-              $ngrokJob = Start-Job -ScriptBlock {
-                  param($path)
-                  & $path tcp 3389 2>&1 | Out-File "$env:TEMP\ngrok.log" -Force
-              } -ArgumentList "$env:TEMP\ngrok\ngrok.exe"
-              Start-Sleep -Seconds 8
               try {
+                  Write-Host "Khoi tao Ngrok Tunnel qua Chocolatey..." -ForegroundColor Yellow
+                  choco install ngrok -y --no-progress
+                  ngrok config add-authtoken $env:NGROK_TOKEN
+                  $ngrokJob = Start-Job -ScriptBlock {
+                      ngrok tcp 3389 2>&1 | Out-File "$env:TEMP\ngrok.log" -Force
+                  }
+                  Start-Sleep -Seconds 8
                   $res = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction SilentlyContinue
                   if ($res.tunnels) {
                       $tunnelUrl = $res.tunnels[0].public_url -replace 'tcp://', ''
                   }
-              } catch {}
+              } catch {
+                  Write-Host "Ngrok init failed, jump to next tier..." -ForegroundColor Yellow
+              }
           }
 
-          # Tier 1: Pinggy Tunnel
+          # Tier 1: Cloudflared Tunnel (Official GitHub Release)
           if (-not $tunnelUrl) {
-              Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
-              $pinggyJob = Start-Job -ScriptBlock {
-                  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1 | Out-File "$env:TEMP\pinggy.log" -Force
-              }
-              Start-Sleep -Seconds 20
-              $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
-              Write-Host "Pinggy Raw Output: $output"
-
-              if ($output) {
-                  $matchesPort = [regex]::Matches($output, '(?:[a-zA-Z0-9-]+\.)+pinggy\.(?:io|link|net):\d+')
-                  if ($matchesPort.Count -gt 0) {
-                      $tunnelUrl = $matchesPort[0].Value
+              try {
+                  Write-Host "Khoi tao Cloudflared Tunnel..." -ForegroundColor Yellow
+                  $cfExe = "$env:TEMP\cloudflared.exe"
+                  Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cfExe -UseBasicParsing -ErrorAction Stop
+                  
+                  $cfJob = Start-Job -ScriptBlock {
+                      param($exe)
+                      & $exe tunnel --url tcp://localhost:3389 2>&1 | Out-File "$env:TEMP\cloudflared.log" -Force
+                  } -ArgumentList $cfExe
+                  
+                  Start-Sleep -Seconds 12
+                  $cfOutput = if (Test-Path "$env:TEMP\cloudflared.log") { Get-Content "$env:TEMP\cloudflared.log" -Raw } else { "" }
+                  Write-Host "Cloudflared Raw Output: $cfOutput"
+                  if ($cfOutput -match '([a-zA-Z0-9-]+\.trycloudflare\.com:\d+)') {
+                      $tunnelUrl = $Matches[1]
+                  } elseif ($cfOutput -match '([a-zA-Z0-9-]+\.trycloudflare\.com)') {
+                      $tunnelUrl = "$($Matches[1]):3389"
                   }
+              } catch {
+                  Write-Host "Cloudflared failed, jump to next tier..." -ForegroundColor Yellow
               }
           }
 
-          # Tier 2: Bore Tunnel (Fix loi match nham nam 2026 trong timestamp log)
+          # Tier 2: Pinggy Tunnel
           if (-not $tunnelUrl) {
-              Write-Host "Pinggy fail! Fallback sang Bore Tunnel (Tier 2)..." -ForegroundColor Yellow
-              $pinggyJob | Stop-Job 2>$null
-              Remove-Job $pinggyJob -Force 2>$null
+              try {
+                  Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
+                  $pinggyJob = Start-Job -ScriptBlock {
+                      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1 | Out-File "$env:TEMP\pinggy.log" -Force
+                  }
+                  Start-Sleep -Seconds 20
+                  $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
+                  Write-Host "Pinggy Raw Output: $output"
 
-              $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
-              $zip = "$env:TEMP\bore.zip"
-              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
-              Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
-
-              $boreJob = Start-Job -ScriptBlock {
-                  param($borePath)
-                  & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
-              } -ArgumentList "$env:TEMP\bore\bore.exe"
-
-              Start-Sleep -Seconds 12
-              $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
-              Write-Host "Bore Output: $boreOutput"
-
-              # Fix regex match chinh xac port va khong lay nham date 2026-07-24
-              $boreMatch = [regex]::Match($boreOutput, 'bore\.pub:(\d{4,5})')
-              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'listening at.*?:(\d{4,5})') }
-              if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'remote port:?\s*(\d{4,5})') }
-              if ($boreMatch.Success) {
-                  $borePort = $boreMatch.Groups[1].Value
-                  $tunnelUrl = "bore.pub:$borePort"
+                  if ($output) {
+                      $matchesPort = [regex]::Matches($output, '(?:[a-zA-Z0-9-]+\.)+pinggy\.(?:io|link|net):\d+')
+                      if ($matchesPort.Count -gt 0) {
+                          $tunnelUrl = $matchesPort[0].Value
+                      }
+                  }
+              } catch {
+                  Write-Host "Pinggy failed..." -ForegroundColor Yellow
               }
           }
 
-          # Tier 3: Serveo Fallback
+          # Tier 3: Bore Tunnel (Fix regex date 2026)
           if (-not $tunnelUrl) {
-              Write-Host "Bore fail! Fallback sang Serveo Tunnel (Tier 3)..." -ForegroundColor Yellow
-              $serveoJob = Start-Job -ScriptBlock {
-                  ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -R 0:localhost:3389 serveo.net 2>&1 | Out-File "$env:TEMP\serveo.log" -Force
+              try {
+                  Write-Host "Fallback sang Bore Tunnel (Tier 3)..." -ForegroundColor Yellow
+                  $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
+                  $zip = "$env:TEMP\bore.zip"
+                  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -ErrorAction Stop
+                  Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
+
+                  $boreJob = Start-Job -ScriptBlock {
+                      param($borePath)
+                      & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
+                  } -ArgumentList "$env:TEMP\bore\bore.exe"
+
+                  Start-Sleep -Seconds 12
+                  $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
+                  Write-Host "Bore Output: $boreOutput"
+
+                  $boreMatch = [regex]::Match($boreOutput, 'bore\.pub:(\d{4,5})')
+                  if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'listening at.*?:(\d{4,5})') }
+                  if ($boreMatch.Success) {
+                      $borePort = $boreMatch.Groups[1].Value
+                      $tunnelUrl = "bore.pub:$borePort"
+                  }
+              } catch {
+                  Write-Host "Bore failed..." -ForegroundColor Yellow
               }
-              Start-Sleep -Seconds 15
-              $serveoOutput = if (Test-Path "$env:TEMP\serveo.log") { Get-Content "$env:TEMP\serveo.log" -Raw } else { "" }
-              Write-Host "Serveo Output: $serveoOutput"
-              if ($serveoOutput -match 'serveo\.net:(\d+)') {
-                  $tunnelUrl = "serveo.net:$($Matches[1])"
-              }
+          }
+
+          # Tier 4: Serveo Fallback
+          if (-not $tunnelUrl) {
+              try {
+                  Write-Host "Fallback sang Serveo Tunnel (Tier 4)..." -ForegroundColor Yellow
+                  $serveoJob = Start-Job -ScriptBlock {
+                      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -R 0:localhost:3389 serveo.net 2>&1 | Out-File "$env:TEMP\serveo.log" -Force
+                  }
+                  Start-Sleep -Seconds 15
+                  $serveoOutput = if (Test-Path "$env:TEMP\serveo.log") { Get-Content "$env:TEMP\serveo.log" -Raw } else { "" }
+                  Write-Host "Serveo Output: $serveoOutput"
+                  if ($serveoOutput -match 'serveo\.net:(\d+)') {
+                      $tunnelUrl = "serveo.net:$($Matches[1])"
+                  }
+              } catch {}
           }
 
           "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
