@@ -75,28 +75,37 @@ jobs:
         run: |
           $boreBin = "$env:BORE_DIR\bore.exe"
 
-          # Start bore tunnel in background, pipe output to log file
-          $logFile = "$env:TEMP\bore_output.txt"
+          # bore logs to stderr — redirect BOTH stdout + stderr to capture tunnel address
+          $stdoutLog = "$env:TEMP\bore_stdout.txt"
+          $stderrLog = "$env:TEMP\bore_stderr.txt"
+
           Start-Process -FilePath $boreBin `
             -ArgumentList "local", "3389", "--to", "bore.pub" `
-            -RedirectStandardOutput $logFile `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError  $stderrLog `
             -NoNewWindow
 
-          # Wait for bore to print the tunnel address
+          # Wait for bore to print the tunnel address (check both files)
           $boreAddr = $null
           $retry = 0
-          while (-not $boreAddr -and $retry -lt 20) {
-              Start-Sleep -Seconds 3
-              if (Test-Path $logFile) {
-                  $content = Get-Content $logFile -Raw
-                  if ($content -match 'bore\.pub:(\d+)') {
-                      $boreAddr = "bore.pub:$($matches[1])"
+          while (-not $boreAddr -and $retry -lt 24) {
+              Start-Sleep -Seconds 5
+              foreach ($logFile in @($stdoutLog, $stderrLog)) {
+                  if (Test-Path $logFile) {
+                      $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+                      if ($content -match 'bore\.pub:(\d+)') {
+                          $boreAddr = "bore.pub:$($matches[1])"
+                      }
                   }
               }
               $retry++
           }
 
           if (-not $boreAddr) {
+              Write-Host "=== bore stdout ==="
+              Get-Content $stdoutLog -ErrorAction SilentlyContinue
+              Write-Host "=== bore stderr ==="
+              Get-Content $stderrLog -ErrorAction SilentlyContinue
               Write-Error "bore tunnel failed to start. Check network connectivity."
               exit 1
           }
@@ -104,16 +113,23 @@ jobs:
           echo "BORE_ADDR=$boreAddr" >> $env:GITHUB_ENV
           Write-Host "Tunnel established: $boreAddr"
 
-      - name: Execute Integration Session
+      - name: Show Session Info
         run: |
-          Write-Host "`n=== SESSION READY ==="
-          Write-Host "Host    : $env:BORE_ADDR"
-          Write-Host "User    : DevRunner"
-          Write-Host "Pass    : $env:SESSION_PASS"
-          Write-Host "=====================`n"
-          Write-Host "Connect via: mstsc /v:$env:BORE_ADDR"
+          # Dùng echo để GH Actions render notice annotation lên đầu trang workflow
+          echo "::notice title=🖥️ RDP Session Ready::Host=$env:BORE_ADDR | User=DevRunner | Pass=$env:SESSION_PASS"
 
+          Write-Host "`n========================================"
+          Write-Host "  HOST : $env:BORE_ADDR"
+          Write-Host "  USER : DevRunner"
+          Write-Host "  PASS : $env:SESSION_PASS"
+          Write-Host "  CMD  : mstsc /v:$env:BORE_ADDR"
+          Write-Host "========================================`n"
+          # Step này chạy xong ngay — log luôn readable
+
+      - name: Keep Session Alive
+        run: |
+          Write-Host "Session is live at $env:BORE_ADDR — keeping runner alive..."
           while ($true) {
-              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Integration session active — $env:BORE_ADDR"
               Start-Sleep -Seconds 300
+              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Still alive"
           }
