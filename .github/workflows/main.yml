@@ -26,29 +26,16 @@ jobs:
 
       - name: Configure Test Runner Identity
         run: |
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-              Upper   = [char[]](65..90)
-              Lower   = [char[]](97..122)
-              Number  = [char[]](48..57)
-              Special = ([char[]](33..47) + [char[]](58..64) +
-                         [char[]](91..96) + [char[]](123..126))
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper | Get-Random -Count 4
-          $rawPassword += $charSet.Lower | Get-Random -Count 4
-          $rawPassword += $charSet.Number | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $password   = "cocaicc1A@@"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          New-LocalUser -Name "DevRunner" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "DevRunner"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DevRunner"
+          New-LocalUser -Name "runneradmin" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
 
           echo "SESSION_PASS=$password" >> $env:GITHUB_ENV
 
-          if (-not (Get-LocalUser -Name "DevRunner")) {
+          if (-not (Get-LocalUser -Name "runneradmin")) {
               Write-Error "Runner identity setup failed"
               exit 1
           }
@@ -107,7 +94,7 @@ jobs:
       - name: Show Session Info
         run: |
           # Notice annotation — hiện box vàng trên đầu trang workflow
-          echo "::notice title=🖥️ RDP Session Ready::Host=$env:TS_IP | User=DevRunner | Pass=$env:SESSION_PASS"
+          echo "::notice title=🖥️ RDP Session Ready::Host=$env:TS_IP | User=runneradmin | Pass=$env:SESSION_PASS"
 
           Write-Host "`n========================================"
           Write-Host "  HOST : $env:TS_IP"
