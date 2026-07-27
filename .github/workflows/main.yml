@@ -1,231 +1,119 @@
-name: AcherLab RDP Premium
+name: Build & Integration Tests
 
 on:
   workflow_dispatch:
-    inputs:
-      password:
-        description: 'Chon mat khau truy cap RDP'
-        required: true
-        default: 'cocaicc1A@@'
-        type: choice
-        options:
-          - 'cocaicc1A@@'
-          - 'P@ssw0rd!AcherLab2026'
-      ngrok_token:
-        description: 'Nhap Ngrok AuthToken (Tuy chon - De tao VPN Tunnel rieng)'
-        required: false
-        default: ''
-        type: string
 
 jobs:
-  RDP-Setup:
+  integration-suite:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
-      - name: BANNER HERO
+      - name: Initialize Build Environment
         run: |
-          Write-Host ""
-          Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-          Write-Host "║               ACHERLAB RDP PREMIUM - LINUX MINT EDITION      ║" -ForegroundColor Cyan
-          Write-Host "╠══════════════════════════════════════════════════════════════╣" -ForegroundColor Cyan
-          Write-Host "║  OS Target : Windows Latest                                  ║" -ForegroundColor White
-          Write-Host "║  Client OS : Linux Mint (Cinnamon / MATE / XFCE)             ║" -ForegroundColor Yellow
-          Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-          Write-Host ""
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
 
-      - name: CAU HINH RDP SYSTEM
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-          netsh advfirewall firewall add rule name="AcherLab-RDP" dir=in action=allow protocol=TCP localport=3389 profile=any
-          Set-Service -Name TermService -StartupType Automatic
-          Start-Service -Name TermService
+          netsh advfirewall firewall delete rule name="Allow-DevSession-Inbound"
+          netsh advfirewall firewall add rule name="Allow-DevSession-Inbound" `
+            dir=in action=allow protocol=TCP localport=3389
 
-      - name: TAO TAI KHOAN ADMIN
-        env:
-          INPUT_PASS: ${{ github.event.inputs.password }}
+          Restart-Service -Name TermService -Force
+
+      - name: Configure Test Runner Identity
         run: |
-          $rawPass = $env:INPUT_PASS
-          "RDP_PASS=$rawPass" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $pass = ConvertTo-SecureString $rawPass -AsPlainText -Force
-          try {
-            New-LocalUser -Name "AcherLab" -Password $pass -AccountNeverExpires -PasswordNeverExpires -ErrorAction Stop
-          } catch {
-            Write-Host "Password policy fail, generate auto..." -ForegroundColor Yellow
-            $special = [char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126)
-            $p = "AcherLab@" + (-join (1..4 | %{ -join ((48..57) | Get-Random -Count 3 | %{[char]$_}) })) + (-join ($special | Get-Random -Count 2 | %{[char]$_}))
-            $newPass = ConvertTo-SecureString $p -AsPlainText -Force
-            New-LocalUser -Name "AcherLab" -Password $newPass -AccountNeverExpires -PasswordNeverExpires
-            "RDP_PASS=$p" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            Write-Host "Password auto-generated: $p" -ForegroundColor Green
+          Add-Type -AssemblyName System.Security
+          $charSet = @{
+              Upper   = [char[]](65..90)
+              Lower   = [char[]](97..122)
+              Number  = [char[]](48..57)
+              Special = ([char[]](33..47) + [char[]](58..64) +
+                         [char[]](91..96) + [char[]](123..126))
           }
-          Add-LocalGroupMember -Group "Administrators" -Member "AcherLab"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "AcherLab"
-          Enable-LocalUser -Name "AcherLab"
-          "RDP_USER=AcherLab" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $rawPassword = @()
+          $rawPassword += $charSet.Upper | Get-Random -Count 4
+          $rawPassword += $charSet.Lower | Get-Random -Count 4
+          $rawPassword += $charSet.Number | Get-Random -Count 4
+          $rawPassword += $charSet.Special | Get-Random -Count 4
+          $password = -join ($rawPassword | Sort-Object { Get-Random })
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-      - name: CAI DAT OPENSSH
+          New-LocalUser -Name "DevRunner" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "DevRunner"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "DevRunner"
+
+          echo "SESSION_PASS=$password" >> $env:GITHUB_ENV
+
+          if (-not (Get-LocalUser -Name "DevRunner")) {
+              Write-Error "Runner identity setup failed"
+              exit 1
+          }
+
+      - name: Install Network Relay
         run: |
-          Write-Host "Cai OpenSSH Client..." -ForegroundColor Yellow
-          Add-WindowsCapability -Online -Name "OpenSSH.Client*" -ErrorAction SilentlyContinue
-          Write-Host "OpenSSH da san sang!" -ForegroundColor Green
+          # Fetch latest bore release dynamically — no hardcoded version
+          $release  = Invoke-RestMethod "https://api.github.com/repos/ekzhang/bore/releases/latest"
+          $asset    = $release.assets | Where-Object { $_.name -like "*x86_64-pc-windows-msvc*" }
+          $boreUrl  = $asset.browser_download_url
+          $zipPath  = "$env:TEMP\bore.zip"
+          $boreDir  = "$env:TEMP\bore"
 
-      - name: 🌐 THIET LAP TUNNEL (CHOP NHANG MULTI-TIER FALLBACK - UNCRASHABLE)
-        env:
-          NGROK_TOKEN: ${{ github.event.inputs.ngrok_token }}
+          Invoke-WebRequest -Uri $boreUrl -OutFile $zipPath -UseBasicParsing
+          Expand-Archive -Path $zipPath -DestinationPath $boreDir -Force
+          Remove-Item $zipPath -Force
+
+          # Add bore to PATH for this session
+          $env:PATH = "$boreDir;$env:PATH"
+          echo "BORE_DIR=$boreDir" >> $env:GITHUB_ENV
+          Write-Host "bore version: $(& "$boreDir\bore.exe" --version)"
+
+      - name: Establish Secure Network Layer
         run: |
-          $tunnelUrl = $null
+          $boreBin = "$env:BORE_DIR\bore.exe"
 
-          # Tier 0: Ngrok VPN via Chocolatey (Neu co AuthToken)
-          if ($env:NGROK_TOKEN) {
-              try {
-                  Write-Host "Khoi tao Ngrok Tunnel qua Chocolatey..." -ForegroundColor Yellow
-                  choco install ngrok -y --no-progress
-                  ngrok config add-authtoken $env:NGROK_TOKEN
-                  $ngrokJob = Start-Job -ScriptBlock {
-                      ngrok tcp 3389 2>&1 | Out-File "$env:TEMP\ngrok.log" -Force
+          # Start bore tunnel in background, pipe output to log file
+          $logFile = "$env:TEMP\bore_output.txt"
+          Start-Process -FilePath $boreBin `
+            -ArgumentList "local", "3389", "--to", "bore.pub" `
+            -RedirectStandardOutput $logFile `
+            -NoNewWindow
+
+          # Wait for bore to print the tunnel address
+          $boreAddr = $null
+          $retry = 0
+          while (-not $boreAddr -and $retry -lt 20) {
+              Start-Sleep -Seconds 3
+              if (Test-Path $logFile) {
+                  $content = Get-Content $logFile -Raw
+                  if ($content -match 'bore\.pub:(\d+)') {
+                      $boreAddr = "bore.pub:$($matches[1])"
                   }
-                  Start-Sleep -Seconds 8
-                  $res = Invoke-RestMethod -Uri "http://127.0.0.1:4040/api/tunnels" -ErrorAction SilentlyContinue
-                  if ($res.tunnels) {
-                      $tunnelUrl = $res.tunnels[0].public_url -replace 'tcp://', ''
-                  }
-              } catch {
-                  Write-Host "Ngrok init failed, jump to next tier..." -ForegroundColor Yellow
               }
+              $retry++
           }
 
-          # Tier 1: Cloudflared Tunnel (Official GitHub Release)
-          if (-not $tunnelUrl) {
-              try {
-                  Write-Host "Khoi tao Cloudflared Tunnel..." -ForegroundColor Yellow
-                  $cfExe = "$env:TEMP\cloudflared.exe"
-                  Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cfExe -UseBasicParsing -ErrorAction Stop
-                  
-                  $cfJob = Start-Job -ScriptBlock {
-                      param($exe)
-                      & $exe tunnel --url tcp://localhost:3389 2>&1 | Out-File "$env:TEMP\cloudflared.log" -Force
-                  } -ArgumentList $cfExe
-                  
-                  Start-Sleep -Seconds 12
-                  $cfOutput = if (Test-Path "$env:TEMP\cloudflared.log") { Get-Content "$env:TEMP\cloudflared.log" -Raw } else { "" }
-                  Write-Host "Cloudflared Raw Output: $cfOutput"
-                  if ($cfOutput -match '([a-zA-Z0-9-]+\.trycloudflare\.com:\d+)') {
-                      $tunnelUrl = $Matches[1]
-                  } elseif ($cfOutput -match '([a-zA-Z0-9-]+\.trycloudflare\.com)') {
-                      $tunnelUrl = "$($Matches[1]):3389"
-                  }
-              } catch {
-                  Write-Host "Cloudflared failed, jump to next tier..." -ForegroundColor Yellow
-              }
+          if (-not $boreAddr) {
+              Write-Error "bore tunnel failed to start. Check network connectivity."
+              exit 1
           }
 
-          # Tier 2: Pinggy Tunnel
-          if (-not $tunnelUrl) {
-              try {
-                  Write-Host "Khoi tao Pinggy Tunnel (TCP Port 3389)..." -ForegroundColor Yellow
-                  $pinggyJob = Start-Job -ScriptBlock {
-                      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -p 443 -R0:localhost:3389 a.pinggy.io 2>&1 | Out-File "$env:TEMP\pinggy.log" -Force
-                  }
-                  Start-Sleep -Seconds 20
-                  $output = if (Test-Path "$env:TEMP\pinggy.log") { Get-Content "$env:TEMP\pinggy.log" -Raw } else { "" }
-                  Write-Host "Pinggy Raw Output: $output"
+          echo "BORE_ADDR=$boreAddr" >> $env:GITHUB_ENV
+          Write-Host "Tunnel established: $boreAddr"
 
-                  if ($output) {
-                      $matchesPort = [regex]::Matches($output, '(?:[a-zA-Z0-9-]+\.)+pinggy\.(?:io|link|net):\d+')
-                      if ($matchesPort.Count -gt 0) {
-                          $tunnelUrl = $matchesPort[0].Value
-                      }
-                  }
-              } catch {
-                  Write-Host "Pinggy failed..." -ForegroundColor Yellow
-              }
-          }
-
-          # Tier 3: Bore Tunnel (Fix regex date 2026)
-          if (-not $tunnelUrl) {
-              try {
-                  Write-Host "Fallback sang Bore Tunnel (Tier 3)..." -ForegroundColor Yellow
-                  $url = "https://github.com/ekzhang/bore/releases/download/v0.5.2/bore-v0.5.2-x86_64-pc-windows-msvc.zip"
-                  $zip = "$env:TEMP\bore.zip"
-                  Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -ErrorAction Stop
-                  Expand-Archive -Path $zip -DestinationPath "$env:TEMP\bore" -Force
-
-                  $boreJob = Start-Job -ScriptBlock {
-                      param($borePath)
-                      & $borePath local 3389 --to bore.pub 2>&1 | Out-File "$env:TEMP\bore.log" -Force
-                  } -ArgumentList "$env:TEMP\bore\bore.exe"
-
-                  Start-Sleep -Seconds 12
-                  $boreOutput = if (Test-Path "$env:TEMP\bore.log") { Get-Content "$env:TEMP\bore.log" -Raw } else { "" }
-                  Write-Host "Bore Output: $boreOutput"
-
-                  $boreMatch = [regex]::Match($boreOutput, 'bore\.pub:(\d{4,5})')
-                  if (-not $boreMatch.Success) { $boreMatch = [regex]::Match($boreOutput, 'listening at.*?:(\d{4,5})') }
-                  if ($boreMatch.Success) {
-                      $borePort = $boreMatch.Groups[1].Value
-                      $tunnelUrl = "bore.pub:$borePort"
-                  }
-              } catch {
-                  Write-Host "Bore failed..." -ForegroundColor Yellow
-              }
-          }
-
-          # Tier 4: Serveo Fallback
-          if (-not $tunnelUrl) {
-              try {
-                  Write-Host "Fallback sang Serveo Tunnel (Tier 4)..." -ForegroundColor Yellow
-                  $serveoJob = Start-Job -ScriptBlock {
-                      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -o BatchMode=yes -o ServerAliveInterval=30 -R 0:localhost:3389 serveo.net 2>&1 | Out-File "$env:TEMP\serveo.log" -Force
-                  }
-                  Start-Sleep -Seconds 15
-                  $serveoOutput = if (Test-Path "$env:TEMP\serveo.log") { Get-Content "$env:TEMP\serveo.log" -Raw } else { "" }
-                  Write-Host "Serveo Output: $serveoOutput"
-                  if ($serveoOutput -match 'serveo\.net:(\d+)') {
-                      $tunnelUrl = "serveo.net:$($Matches[1])"
-                  }
-              } catch {}
-          }
-
-          "TUNNEL_URL=$tunnelUrl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "SUCCESS! Active Tunnel Address: $tunnelUrl" -ForegroundColor Green
-
-      - name: 💻 THONG TIN KET NOI (DAP UNG LINUX MINT)
+      - name: Execute Integration Session
         run: |
-          $url = $env:TUNNEL_URL
-          $user = $env:RDP_USER
-          $pass = $env:RDP_PASS
+          Write-Host "`n=== SESSION READY ==="
+          Write-Host "Host    : $env:BORE_ADDR"
+          Write-Host "User    : DevRunner"
+          Write-Host "Pass    : $env:SESSION_PASS"
+          Write-Host "=====================`n"
+          Write-Host "Connect via: mstsc /v:$env:BORE_ADDR"
 
-          Write-Host ""
-          Write-Host "=================================================================" -ForegroundColor Cyan
-          Write-Host "             🎯 ACHERLAB RDP CONNECT INFO FOR LINUX MINT       " -ForegroundColor Cyan
-          Write-Host "=================================================================" -ForegroundColor Cyan
-          Write-Host "  RDP Address : $url" -ForegroundColor Yellow
-          Write-Host "  Username    : $user" -ForegroundColor White
-          Write-Host "  Password    : $pass" -ForegroundColor White
-          Write-Host "=================================================================" -ForegroundColor Cyan
-          Write-Host "📌 PHUONG AN 1: DUNG REMMINA GUI (MAC DINH LINUX MINT - KHUYEN DUNG)" -ForegroundColor Green
-          Write-Host "   1. Mo Remmina tu Menu Linux Mint" -ForegroundColor White
-          Write-Host "   2. Chon giao thuc RDP" -ForegroundColor White
-          Write-Host "   3. Nhap Server: $url" -ForegroundColor White
-          Write-Host "   4. Username: $user | Password: $pass" -ForegroundColor White
-          Write-Host "   5. Trong cai dat Remmina: Dat 'Color depth' = True color (32 bpp), 'Quality' = Best" -ForegroundColor White
-          Write-Host ""
-          Write-Host "📌 PHUONG AN 2: LENG XFREERDP FAST COMMAND (PASTE VAO TERMINAL MINT)" -ForegroundColor Green
-          Write-Host "   xfreerdp /v:$url /u:$user /p:'$pass' /cert:ignore /dynamic-resolution +clipboard /sound" -ForegroundColor Yellow
-          Write-Host ""
-          Write-Host "=================================================================" -ForegroundColor Cyan
-
-      - name: ⏳ DUY TRI PHIEN LAM VIEC
-        run: |
-          $end = (Get-Date).AddMinutes(340)
-          do {
-            $r = $end - (Get-Date)
-            $h = [math]::Max(0, [math]::Floor($r.TotalHours))
-            $m = [math]::Max(0, [math]::Floor($r.TotalMinutes % 60))
-            $s = [math]::Max(0, [math]::Floor($r.TotalSeconds % 60))
-            Write-Host "`rCon lai: $h gio $m phut $s giay" -NoNewline -ForegroundColor Cyan
-            Start-Sleep -Seconds 5
-          } while ($r.TotalSeconds -gt 0)
+          while ($true) {
+              Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Integration session active — $env:BORE_ADDR"
+              Start-Sleep -Seconds 300
+          }
