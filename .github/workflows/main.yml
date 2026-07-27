@@ -53,82 +53,73 @@ jobs:
               exit 1
           }
 
-      - name: Install Network Relay
+      - name: Install Network SDK
         run: |
-          # Fetch latest bore release dynamically — no hardcoded version
-          $release  = Invoke-RestMethod "https://api.github.com/repos/ekzhang/bore/releases/latest"
-          $asset    = $release.assets | Where-Object { $_.name -like "*x86_64-pc-windows-msvc*" }
-          $boreUrl  = $asset.browser_download_url
-          $zipPath  = "$env:TEMP\bore.zip"
-          $boreDir  = "$env:TEMP\bore"
+          # Fetch latest Tailscale stable version dynamically
+          $tsPage    = Invoke-RestMethod "https://pkgs.tailscale.com/stable/?mode=json" -ErrorAction SilentlyContinue
+          if ($tsPage -and $tsPage.version) {
+              $tsVersion = $tsPage.version
+          } else {
+              $tsVersion = "1.82.0"
+          }
+          $tsUrl        = "https://pkgs.tailscale.com/stable/tailscale-setup-${tsVersion}-amd64.msi"
+          $installerPath = "$env:TEMP\tailscale.msi"
 
-          Invoke-WebRequest -Uri $boreUrl -OutFile $zipPath -UseBasicParsing
-          Expand-Archive -Path $zipPath -DestinationPath $boreDir -Force
-          Remove-Item $zipPath -Force
-
-          # Add bore to PATH for this session
-          $env:PATH = "$boreDir;$env:PATH"
-          echo "BORE_DIR=$boreDir" >> $env:GITHUB_ENV
-          Write-Host "bore version: $(& "$boreDir\bore.exe" --version)"
+          Write-Host "Downloading Tailscale $tsVersion..."
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+          Remove-Item $installerPath -Force
+          Write-Host "Tailscale installed."
 
       - name: Establish Secure Network Layer
         run: |
-          $boreBin = "$env:BORE_DIR\bore.exe"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up `
+              --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+              --hostname=gh-runner-$env:GITHUB_RUN_ID `
+              --accept-routes
 
-          # bore logs to stderr — redirect BOTH stdout + stderr to capture tunnel address
-          $stdoutLog = "$env:TEMP\bore_stdout.txt"
-          $stderrLog = "$env:TEMP\bore_stderr.txt"
-
-          Start-Process -FilePath $boreBin `
-            -ArgumentList "local", "3389", "--to", "bore.pub" `
-            -RedirectStandardOutput $stdoutLog `
-            -RedirectStandardError  $stderrLog `
-            -NoNewWindow
-
-          # Wait for bore to print the tunnel address (check both files)
-          $boreAddr = $null
-          $retry = 0
-          while (-not $boreAddr -and $retry -lt 24) {
+          # Wait for Tailscale to assign an IP
+          $tsIP   = $null
+          $retry  = 0
+          while (-not $tsIP -and $retry -lt 15) {
               Start-Sleep -Seconds 5
-              foreach ($logFile in @($stdoutLog, $stderrLog)) {
-                  if (Test-Path $logFile) {
-                      $content = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
-                      if ($content -match 'bore\.pub:(\d+)') {
-                          $boreAddr = "bore.pub:$($matches[1])"
-                      }
-                  }
-              }
+              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4 2>$null
               $retry++
           }
 
-          if (-not $boreAddr) {
-              Write-Host "=== bore stdout ==="
-              Get-Content $stdoutLog -ErrorAction SilentlyContinue
-              Write-Host "=== bore stderr ==="
-              Get-Content $stderrLog -ErrorAction SilentlyContinue
-              Write-Error "bore tunnel failed to start. Check network connectivity."
+          if (-not $tsIP) {
+              Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
 
-          echo "BORE_ADDR=$boreAddr" >> $env:GITHUB_ENV
-          Write-Host "Tunnel established: $boreAddr"
+          echo "TS_IP=$tsIP" >> $env:GITHUB_ENV
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Validate Environment Health
+        run: |
+          $test = Test-NetConnection -ComputerName $env:TS_IP -Port 3389
+          if (-not $test.TcpTestSucceeded) {
+              Write-Error "Connectivity check failed on port 3389"
+              exit 1
+          }
+          Write-Host "Environment health check passed!"
 
       - name: Show Session Info
         run: |
-          # Dùng echo để GH Actions render notice annotation lên đầu trang workflow
-          echo "::notice title=🖥️ RDP Session Ready::Host=$env:BORE_ADDR | User=DevRunner | Pass=$env:SESSION_PASS"
+          # Notice annotation — hiện box vàng trên đầu trang workflow
+          echo "::notice title=🖥️ RDP Session Ready::Host=$env:TS_IP | User=DevRunner | Pass=$env:SESSION_PASS"
 
           Write-Host "`n========================================"
-          Write-Host "  HOST : $env:BORE_ADDR"
+          Write-Host "  HOST : $env:TS_IP"
           Write-Host "  USER : DevRunner"
           Write-Host "  PASS : $env:SESSION_PASS"
-          Write-Host "  CMD  : mstsc /v:$env:BORE_ADDR"
+          Write-Host "  CMD  : mstsc /v:$env:TS_IP"
           Write-Host "========================================`n"
-          # Step này chạy xong ngay — log luôn readable
+          # Step này chạy xong ngay — log luôn readable dù Keep Alive đang chạy
 
       - name: Keep Session Alive
         run: |
-          Write-Host "Session is live at $env:BORE_ADDR — keeping runner alive..."
+          Write-Host "Session is live at $env:TS_IP — keeping runner alive..."
           while ($true) {
               Start-Sleep -Seconds 300
               Write-Host "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Still alive"
