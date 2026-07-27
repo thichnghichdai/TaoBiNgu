@@ -29,16 +29,15 @@ jobs:
           $password   = "cocaicc1A@@"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          New-LocalUser -Name "runneradmin" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin"
+          # runneradmin có sẵn trên GH runner — chỉ đổi pass + enable thôi
+          Set-LocalUser  -Name "runneradmin" -Password $securePass
+          Enable-LocalUser -Name "runneradmin"
+
+          # Add vào group nếu chưa có (bỏ qua lỗi nếu đã là member)
+          Add-LocalGroupMember -Group "Administrators"        -Member "runneradmin" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users"  -Member "runneradmin" -ErrorAction SilentlyContinue
 
           echo "SESSION_PASS=$password" >> $env:GITHUB_ENV
-
-          if (-not (Get-LocalUser -Name "runneradmin")) {
-              Write-Error "Runner identity setup failed"
-              exit 1
-          }
 
       - name: Install Network SDK
         run: |
